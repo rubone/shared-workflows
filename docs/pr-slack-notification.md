@@ -1,14 +1,96 @@
 # PR Slack notification
 
-GitHub Action that posts a message to a Slack channel when a pull request to `main` is opened.
-The repo name and URLs are read from the event payload, so the same workflow file can be copied
-as-is to other repos (see [Reusing in other repos](#reusing-in-other-repos)). If the branch name contains a Jira ticket, the message includes a button that
-opens that ticket in Jira. The repo's project owner(s) can be tagged in Slack (`cc @owner`),
-configured in the workflow file with `SLACK_MENTION_IDS`.
+Workflow that posts a message to a Slack channel when a pull request is opened. It is a
+single self-contained file that you can **copy as-is into any repo, in any organization**, or
+**call** as a reusable workflow from repos of the same owner. The repo name and URLs are read
+from the event payload. If the branch name contains a Jira ticket, the message includes a button
+that opens that ticket in Jira. The repo's project owner(s) can be tagged in Slack (`cc @owner`).
 
 - Workflow: [`.github/workflows/pr_slack_notify.yml`](../.github/workflows/pr_slack_notify.yml)
+- Caller sample (call mode): [`examples/pr-slack-notify.yml`](../examples/pr-slack-notify.yml)
 - Delivery: Slack [Incoming Webhook](https://api.slack.com/messaging/webhooks) (plain `curl`, no third-party action)
 - Repo access: none (`permissions: {}`, no checkout). The job only reads the event payload.
+
+---
+
+## Usage
+
+The same file supports two modes. Pick one per repo.
+
+| | A) Copy (main use) | B) Call |
+|---|---|---|
+| Works for | Any repo, any organization | Repos of the same owner as `rubone/shared-workflows` (or any repo, if this one is public) |
+| What goes in the project repo | The whole `pr_slack_notify.yml` | A ~20-line caller ([example](../examples/pr-slack-notify.yml)) |
+| Where values go | Top-level `env:` of the copied file | `with:` inputs in the caller |
+| Trigger | `on.pull_request` in the copied file | `on:` in the caller |
+| Updates | Re-copy the file | Bump the tag (`@v1` → `@v2`) |
+
+### A) Copy
+
+1. Copy [`.github/workflows/pr_slack_notify.yml`](../.github/workflows/pr_slack_notify.yml)
+   unchanged to `.github/workflows/` in the target repo.
+2. Edit the top-level `env:` block:
+   ```yaml
+   env:
+     JIRA_BASE_URL: 'https://<your-domain>.atlassian.net'   # no trailing slash
+     SLACK_MENTION_IDS: 'U01ABCDEFG'                        # '' = tag nobody
+   ```
+3. Add the `SLACK_PR_WEBHOOK_URL` secret to the repo or its org ([Setup 2](#2-github-add-the-secret)).
+4. If the default branch isn't `main`, change `on.pull_request.branches`.
+
+The `workflow_call` trigger and its inputs stay in the file but do nothing in copy mode, so
+there is no need to delete them. Keeping the file identical to this repo makes it easy to
+update: copy the new version and re-apply the two `env` values.
+
+### B) Call
+
+In the project repo, create `.github/workflows/pr-slack-notify.yml`:
+
+```yaml
+name: PR Slack notification
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  notify:
+    uses: rubone/shared-workflows/.github/workflows/pr_slack_notify.yml@v1
+    with:
+      jira_base_url: 'https://<your-domain>.atlassian.net'
+      slack_mention_ids: 'U01ABCDEFG'
+    secrets:
+      SLACK_PR_WEBHOOK_URL: ${{ secrets.SLACK_PR_WEBHOOK_URL }}
+```
+
+Pin a version tag (`@v1`) or a commit SHA, not `@main`, so changes here don't break callers.
+`secrets: inherit` also works instead of passing the secret explicitly. If this repo is
+private, see [the access note](#adding-it-to-more-repos).
+
+#### Inputs
+
+Each input overrides the matching top-level `env` value of the workflow file. When an input is
+empty, the `env` value from this repo's copy is used. Here that is the Jira placeholder, which
+produces no link, and no mentions.
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `jira_base_url` | string | no | `''` | Jira site, e.g. `https://<your-domain>.atlassian.net`. Must match `^https://[A-Za-z0-9.-]+$` (no path, no trailing `/`). Otherwise no Ticket button. |
+| `slack_mention_ids` | string | no | `''` | Slack member IDs (`U…` / `W…`) of the project owner(s), separated by spaces or commas. Empty = no `cc` line. |
+
+#### Secrets
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `SLACK_PR_WEBHOOK_URL` | no | Slack Incoming Webhook URL. If missing, the job skips with a warning and stays green. |
+
+#### Outputs
+
+None.
 
 ---
 
@@ -22,8 +104,8 @@ Complete #1 → #2 → #3 in that order, since each one needs the previous;
 | 1 | Target Slack channel | Slack | — | ☐ | Team |
 | 2 | Slack app + Incoming Webhook for that channel ([Setup 1](#1-slack-create-the-app-and-the-webhook)) | api.slack.com/apps | #1 | ☐ | Slack admin |
 | 3 | `SLACK_PR_WEBHOOK_URL` secret = the webhook URL from #2 ([Setup 2](#2-github-add-the-secret)) | GitHub → repo (or org) Settings → Secrets and variables → Actions | #2 | ☐ | Repo admin |
-| 4 | `JIRA_BASE_URL` = your Jira site, e.g. `https://<your-domain>.atlassian.net` ([Setup 4](#4-repo-set-the-jira-base-url)) | `.github/workflows/pr_slack_notify.yml`, top-level `env` | — | ☐ | Dev |
-| 5 | `SLACK_MENTION_IDS` = Slack member ID(s) of the project owner(s), e.g. `U01ABCDEFG` ([Setup 3](#3-repo-tag-the-project-owners)) | `.github/workflows/pr_slack_notify.yml`, top-level `env` | — | ☐ | Dev |
+| 4 | Jira site, e.g. `https://<your-domain>.atlassian.net` ([Setup 4](#4-repo-set-the-jira-base-url)) | Copy: `env.JIRA_BASE_URL` · Call: `with: jira_base_url` | — | ☐ | Dev |
+| 5 | Slack member ID(s) of the project owner(s), e.g. `U01ABCDEFG` ([Setup 3](#3-repo-tag-the-project-owners)) | Copy: `env.SLACK_MENTION_IDS` · Call: `with: slack_mention_ids` | — | ☐ | Dev |
 
 Until #3 is set, the job
 **skips with a warning** and stays green, so the workflow can be merged before Slack is ready.
@@ -36,7 +118,7 @@ Until #3 is set, the job
 
 ```mermaid
 flowchart TD
-    A[PR event in any repo with this workflow] --> B{Base branch is main?}
+    A[PR event in a repo with the workflow<br/>copied file or caller] --> B{Base branch is main?}
     B -- No --> X[Workflow does not run]
     B -- Yes --> C{Event type}
     C -- opened --> D{PR is draft?}
@@ -51,14 +133,18 @@ flowchart TD
   are actually ready.
 - New commits, edits, reviews, merges and closes do **not** notify.
 
+In copy mode the trigger is the `on.pull_request` block of the copied file. In call mode the
+caller defines it, and the workflow's own `on.pull_request` is ignored. The draft check runs
+in both modes.
+
 ### Job steps
 
 ```mermaid
 flowchart TD
-    S[Start job] --> W{SLACK_PR_WEBHOOK_URL set?}
+    S[Start job] --> W{SLACK_PR_WEBHOOK_URL passed?}
     W -- No --> WARN[::warning:: secret missing<br/>exit 0, job green] --> END[End]
     W -- Yes --> T[Extract ticket from branch name]
-    T --> V{Valid ticket<br/>AND JIRA_BASE_URL configured?}
+    T --> V{Valid ticket<br/>AND Jira URL valid?}
     V -- Yes --> L[JIRA_URL = JIRA_BASE_URL/browse/TICKET]
     V -- No --> N[::notice:: no Jira link<br/>TICKET and JIRA_URL empty]
     L --> M
@@ -84,7 +170,7 @@ flowchart TD
    Regex: `(^|/)[A-Za-z][A-Za-z0-9]+-[0-9]+`
 3. Convert it to uppercase.
 4. Validate it: `^[A-Z][A-Z0-9]+-[1-9][0-9]*$`. The number can't be `0` or start with `0`.
-5. The link is built only if the ticket is valid **and** `JIRA_BASE_URL` is a valid `https://host`.
+5. The link is built only if the ticket is valid **and** the Jira URL is a valid `https://host`.
 
 | Branch | Ticket | Ticket button |
 |--------|--------|-------------|
@@ -124,7 +210,7 @@ Push / fallback: "[<repo>] New PR #464: feat: add orders model cc @Project Owner
 
 - **&lt;repo&gt;** links to the repo; the **PR title** links to the PR.
 - **Ticket PROJ-1234** → `https://<your-domain>.atlassian.net/browse/PROJ-1234`
-- **cc @Project Owner** is each Slack user in `SLACK_MENTION_IDS`; Slack shows their display
+- **cc @Project Owner** is each Slack user in the mention list; Slack shows their display
   names and notifies them. With an empty list, this line isn't there.
 
 ### Without a ticket
@@ -203,11 +289,14 @@ update the GitHub secret.
 ### 2. GitHub: add the secret
 
 1. In each repo that uses the workflow → **Settings → Secrets and variables → Actions**.
-   (Or once at org level; see [Reusing in other repos](#reusing-in-other-repos).)
+   (Or once at org level; see [Adding it to more repos](#adding-it-to-more-repos).)
 2. **New repository secret**:
    - Name: `SLACK_PR_WEBHOOK_URL`
    - Secret: the webhook URL from step 1.5
 3. Save. Requires repo admin permission.
+4. Copy mode: nothing else to do. Call mode: pass it in the caller
+   (`secrets: SLACK_PR_WEBHOOK_URL: ${{ secrets.SLACK_PR_WEBHOOK_URL }}` or `secrets: inherit`).
+   A secret that exists in the repo but isn't passed is empty inside the reusable workflow.
 
 ### 3. Repo: tag the project owner(s)
 
@@ -216,25 +305,35 @@ Slack only notifies someone when the message uses their **member ID** (`<@U01ABC
 
 1. Get each member ID: in Slack, open the person's profile → **⋮ (More)** → **Copy member ID**.
    It looks like `U01ABCDEFG`.
-2. Edit `.github/workflows/pr_slack_notify.yml`, top-level `env`, separating IDs with spaces or commas:
+2. Set the list, separating IDs with spaces or commas:
    ```yaml
+   # Copy mode: top-level env of the copied file
    env:
      SLACK_MENTION_IDS: 'U01ABCDEFG'                 # one owner
      # SLACK_MENTION_IDS: 'U01ABCDEFG, U02HIJKLMN'   # several owners
+
+   # Call mode: in the caller
+   with:
+     slack_mention_ids: 'U01ABCDEFG'
    ```
 3. Leave it empty (`''`) to tag nobody. Entries that aren't member IDs (`U…` / `W…`) are skipped
    with a warning in the job log.
 
 The list lives in the workflow file on purpose: no extra GitHub variable to manage. **Each repo
-that reuses the workflow must set its own list.** Member IDs aren't secret, so they're fine in code.
+sets its own list.** Member IDs aren't secret, so they're fine in code.
 
 ### 4. Repo: set the Jira base URL
 
-In `.github/workflows/pr_slack_notify.yml`, replace the placeholder with your Jira site:
+Replace the placeholder with your Jira site:
 
 ```yaml
+# Copy mode: top-level env of the copied file
 env:
   JIRA_BASE_URL: 'https://<your-domain>.atlassian.net'   # no trailing slash
+
+# Call mode: in the caller
+with:
+  jira_base_url: 'https://<your-domain>.atlassian.net'
 ```
 
 The value must match `^https://[A-Za-z0-9.-]+$`: no path and no trailing `/`. Otherwise
@@ -242,49 +341,59 @@ the link is skipped.
 
 ### 5. Verify
 
-1. Merge the workflow to `main`. The `pull_request` trigger uses the workflow file from the PR,
-   but having it on `main` keeps it active for every new branch.
+1. Merge the workflow file (copy mode) or the caller (call mode) to the project's `main`. The
+   `pull_request` trigger uses the file from the PR, but having it on `main` keeps it active for
+   every new branch.
 2. Open a test PR from a branch with a ticket, e.g. `PROJ-12345-test-slack-notify`.
 3. Check **Actions → PR Slack notification**: the job should be green, and the message should
-   appear in the channel with the Ticket button and, if `SLACK_MENTION_IDS` is set, the owner(s) tagged.
+   appear in the channel with the Ticket button and, if mentions are set, the owner(s) tagged.
 4. Close the test PR without merging.
 
 ---
 
-## Reusing in other repos
+## Adding it to more repos
 
 The repo name, repo URL and PR URLs come from `github.event.repository` /
-`github.event.pull_request`, so the only repo-specific value is `SLACK_MENTION_IDS`. To add it to
-another repo:
+`github.event.pull_request`, so the workflow logic needs no per-repo changes. For each project:
 
-1. Copy `.github/workflows/pr_slack_notify.yml` into the other repo.
+1. Add the workflow, either:
+   - **Copy mode** (any org): copy `.github/workflows/pr_slack_notify.yml` and edit its `env:` block.
+   - **Call mode** (same owner): copy [`examples/pr-slack-notify.yml`](../examples/pr-slack-notify.yml)
+     and edit its `with:` block.
 2. Make `SLACK_PR_WEBHOOK_URL` available to it, either:
    - **Org secret** (recommended): GitHub org → **Settings → Secrets and variables → Actions →
      New organization secret**, and give the repos access to it. All repos then post to the same
      channel, and the repo name in the message tells them apart.
    - **Repo secret**: a different webhook per repo, to send each repo's PRs to its own channel.
-3. **Set `SLACK_MENTION_IDS`** in the copied file to that repo's project owner(s), or `''` for none.
-   Otherwise the previous repo's owner would be tagged.
-4. Set `JIRA_BASE_URL` to your Jira site (e.g. `https://<your-domain>.atlassian.net`, no trailing slash),
-   unless the copied file already has it.
+3. **Set the mention list** to that repo's project owner(s), or `''` for none. A copied file
+   keeps the previous repo's owners until you change it.
+4. Set the Jira URL (no trailing slash).
 5. If the repo's default branch isn't `main`, change `on.pull_request.branches`.
+
+Each organization needs its own Slack webhook (or reuses one) and its own secret: secrets are
+never shared across organizations.
+
+**Call mode and private repos:** if `shared-workflows` is private, only repos of the same owner
+can call it, and this repo needs **Settings → Actions → General → Access** set to allow them.
+Otherwise the caller fails with "workflow was not found". For other organizations, use copy mode.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Job green, warning `SLACK_PR_WEBHOOK_URL secret is not set` | Secret missing or misspelled | Create or rename the secret (step 2) |
+| Job green, warning `SLACK_PR_WEBHOOK_URL secret is not set` | Secret missing or misspelled, or (call mode) not passed by the caller | Create or rename the secret; in call mode pass it under `secrets:` (Setup 2) |
 | Job fails on `curl` with `403` / `404` | Webhook revoked, or the app was removed from the channel | Create a new webhook and update the secret |
 | Job fails with `400 invalid_blocks` | Payload changed and is no longer valid Block Kit | Validate in the Block Kit Builder |
-| Message has no Ticket button | Branch has no valid ticket, or `JIRA_BASE_URL` was changed to an invalid value | Check the Notice in the job log |
-| No `cc` line | `SLACK_MENTION_IDS` is empty, or none of its entries are valid | Add the member ID(s) (Setup 3) |
+| Message has no Ticket button | Branch has no valid ticket, or the Jira URL is still the placeholder or invalid | Check the Notice in the job log |
+| No `cc` line | The mention list is empty, or none of its entries are valid | Add the member ID(s) (Setup 3) |
 | Warning `SLACK_MENTION_IDS entry '…' is not a Slack member ID` | A username or name instead of the ID | Replace it with the member ID (`U…`) |
 | `cc` line shows but nobody gets notified | ID belongs to another workspace, or the user left | Copy the member ID again from Slack |
-| No run at all | PR is a draft, or its base isn't `main` | Mark it ready for review / retarget it to `main` |
+| No run at all | PR is a draft, or its base isn't in `on.pull_request.branches` | Mark it ready for review / retarget it |
+| Caller fails with `workflow was not found` | Wrong path/ref in `uses:`, or this repo is private and doesn't allow access | Check the `uses:` line and Settings → Actions → General → Access, or switch to copy mode |
 | No message for a PR from a fork | Secrets aren't passed to fork PRs on `pull_request` | Not expected in this private repo. If needed, switch to `pull_request_target` (safe here, since there's no checkout) |
 
 ## Possible extensions
 
 - Notify on `reopened`, merges (`closed` + `merged == true`) or approvals.
 - Mention reviewers or a Slack user group (`<!subteam^ID>`) in the text.
-- Use a repo **variable** (`vars.JIRA_BASE_URL`) instead of hard-coding the Jira URL.
+- Read the Jira URL from an org **variable** (`vars.JIRA_BASE_URL`) so each org sets it once instead of in every file.
