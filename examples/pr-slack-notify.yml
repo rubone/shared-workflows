@@ -1,0 +1,20 @@
+# Copy to .github/workflows/pr-slack-notify.yml in the project repo.
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/pr-slack-notification.md
+name: PR Slack notification
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+    branches:
+      - main   # change if the repo's default branch isn't main
+
+permissions: {}
+
+jobs:
+  notify:
+    uses: rubone/shared-workflows/.github/workflows/pr_slack_notify.yml@v1
+    with:
+      jira_base_url: 'https://<your-domain>.atlassian.net'   # no trailing slash; '' = no Ticket button
+      slack_mention_ids: ''   # this repo's project owner(s), e.g. 'U01ABCDEFG, U02HIJKLMN'
+    secrets:
+      SLACK_PR_WEBHOOK_URL: ${{ secrets.SLACK_PR_WEBHOOK_URL }}

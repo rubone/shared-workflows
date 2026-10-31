@@ -1,25 +1,58 @@
-# Posts a Slack message when a PR to main is opened (or leaves draft).
-# Requires the repo secret SLACK_PR_WEBHOOK_URL (Slack Incoming Webhook); if it is
-# missing the job skips with a warning. The Jira ticket is taken from the branch
-# name (e.g. EA-1190-... or feat/EA-1189-...); without a valid ticket, no link.
-# SLACK_MENTION_IDS (below) tags this repo's project owner(s) in the message; update it
-# when reusing the workflow in another repo.
-# No checkout: the job only reads the event payload. Setup/flows: doc/pr-slack-notification.md
+# PR Slack notification: posts a Slack message when a PR is opened (or leaves draft).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the two values under `env:` below (Jira URL, Slack member IDs).
+#      3. Add the repo (or org) secret SLACK_PR_WEBHOOK_URL = Slack Incoming Webhook URL.
+#      The `pull_request` trigger runs it; `workflow_call` is ignored.
+#
+#   B) CALL (repos of the same owner as rubone/shared-workflows)
+#      uses: rubone/shared-workflows/.github/workflows/pr_slack_notify.yml@v1
+#      with: { jira_base_url: ..., slack_mention_ids: ... }
+#      secrets: { SLACK_PR_WEBHOOK_URL: ... }
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Without SLACK_PR_WEBHOOK_URL the job skips with a warning and stays green.
+# The Jira ticket is taken from the branch name (e.g. EA-1190-... or feat/EA-1189-...);
+# without a valid ticket, no link. No checkout: the job only reads the event payload.
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/pr-slack-notification.md
 name: PR Slack notification
 
 on:
+  # A) Copy mode: runs on PRs to main in the repo that holds this file.
   pull_request:
     types: [opened, ready_for_review]
     branches:
-      - main
+      - main   # change if the repo's default branch isn't main
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      jira_base_url:
+        description: "Jira site, e.g. https://<your-domain>.atlassian.net (no trailing slash). Overrides env.JIRA_BASE_URL."
+        type: string
+        required: false
+        default: ''
+      slack_mention_ids:
+        description: "Slack member IDs to tag (U…/W…), separated by spaces or commas. Overrides env.SLACK_MENTION_IDS."
+        type: string
+        required: false
+        default: ''
+    secrets:
+      SLACK_PR_WEBHOOK_URL:
+        description: "Slack Incoming Webhook URL. If missing, the job skips with a warning."
+        required: false
 
 permissions: {}
 
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
 env:
+  # Your Jira site, no trailing slash. Left as the placeholder = no Ticket button.
   JIRA_BASE_URL: 'https://<your-domain>.atlassian.net'
   # Slack member IDs to tag (profile → ⋮ → Copy member ID), separated by spaces or commas.
-  # e.g. 'U01ABCDEER' or 'U01ABCDEER, U02HIJKERT'. Leave empty to tag nobody.
-  SLACK_MENTION_IDS: 
+  # e.g. 'U01ABCDEFG' or 'U01ABCDEFG, U02HIJKLMN'. Leave empty to tag nobody.
+  SLACK_MENTION_IDS: ''
 
 jobs:
   notify:
@@ -28,6 +61,9 @@ jobs:
     steps:
       - name: Send Slack message
         env:
+          # Call mode passes inputs; in copy mode inputs are empty and the top-level env is used.
+          JIRA_BASE_URL: ${{ inputs.jira_base_url || env.JIRA_BASE_URL }}
+          SLACK_MENTION_IDS: ${{ inputs.slack_mention_ids || env.SLACK_MENTION_IDS }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PR_WEBHOOK_URL }}
           REPO_NAME: ${{ github.event.repository.name }}
           REPO_URL: ${{ github.event.repository.html_url }}
