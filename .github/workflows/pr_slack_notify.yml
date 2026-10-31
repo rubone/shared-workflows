@@ -1,0 +1,113 @@
+# Posts a Slack message when a PR to main is opened (or leaves draft).
+# Requires the repo secret SLACK_PR_WEBHOOK_URL (Slack Incoming Webhook); if it is
+# missing the job skips with a warning. The Jira ticket is taken from the branch
+# name (e.g. EA-1190-... or feat/EA-1189-...); without a valid ticket, no link.
+# SLACK_MENTION_IDS (below) tags this repo's project owner(s) in the message; update it
+# when reusing the workflow in another repo.
+# No checkout: the job only reads the event payload. Setup/flows: doc/pr-slack-notification.md
+name: PR Slack notification
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+    branches:
+      - main
+
+permissions: {}
+
+env:
+  JIRA_BASE_URL: 'https://<your-domain>.atlassian.net'
+  # Slack member IDs to tag (profile → ⋮ → Copy member ID), separated by spaces or commas.
+  # e.g. 'U01ABCDEER' or 'U01ABCDEER, U02HIJKERT'. Leave empty to tag nobody.
+  SLACK_MENTION_IDS: 
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - name: Send Slack message
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PR_WEBHOOK_URL }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_URL: ${{ github.event.repository.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          ADDITIONS: ${{ github.event.pull_request.additions }}
+          DELETIONS: ${{ github.event.pull_request.deletions }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SLACK_WEBHOOK_URL}" ]; then
+            echo "::warning::SLACK_PR_WEBHOOK_URL secret is not set; skipping Slack notification."
+            exit 0
+          fi
+
+          # Ticket = first PROJECT-123 token at the start of the branch or after a '/'.
+          TICKET=$(printf '%s' "${HEAD_REF}" \
+            | grep -oE '(^|/)[A-Za-z][A-Za-z0-9]+-[0-9]+' \
+            | head -n1 | sed 's#^/##' | tr '[:lower:]' '[:upper:]' || true)
+
+          JIRA_URL=""
+          if [[ "${TICKET}" =~ ^[A-Z][A-Z0-9]+-[1-9][0-9]*$ ]] \
+             && [[ "${JIRA_BASE_URL}" =~ ^https://[A-Za-z0-9.-]+$ ]]; then
+            JIRA_URL="${JIRA_BASE_URL}/browse/${TICKET}"
+          else
+            echo "::notice::No valid Jira ticket in branch '${HEAD_REF}' (or JIRA_BASE_URL not set); sending without Jira link."
+            TICKET=""
+          fi
+
+          # Mentions need the Slack member ID; a plain @username wouldn't notify anyone.
+          MENTION=""
+          for id in ${SLACK_MENTION_IDS//,/ }; do
+            if [[ "${id}" =~ ^[UW][A-Z0-9]+$ ]]; then
+              MENTION="${MENTION:+${MENTION} }<@${id}>"
+            else
+              echo "::warning::SLACK_MENTION_IDS entry '${id}' is not a Slack member ID (U…/W…); skipping it."
+            fi
+          done
+
+          # jq builds the JSON so titles/branches with quotes or symbols stay safe.
+          PAYLOAD=$(jq -n \
+            --arg repo "${REPO_NAME}" \
+            --arg repo_url "${REPO_URL}" \
+            --arg number "${PR_NUMBER}" \
+            --arg title "${PR_TITLE}" \
+            --arg url "${PR_URL}" \
+            --arg author "${PR_AUTHOR}" \
+            --arg head "${HEAD_REF}" \
+            --arg base "${BASE_REF}" \
+            --arg stats "+${ADDITIONS} / -${DELETIONS} · ${CHANGED_FILES} files" \
+            --arg ticket "${TICKET}" \
+            --arg jira "${JIRA_URL}" \
+            --arg mention "${MENTION}" \
+            'def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+            ($title | esc) as $title |
+            (if $mention != "" then "\ncc \($mention)" else "" end) as $cc |
+            {
+              text: "[\($repo)] New PR #\($number): \($title)\($cc)",
+              blocks: (
+                [{
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: ":github: *<\($repo_url)|\($repo)> · New PR #\($number): <\($url)|\($title)>*\nby *\($author)* · `\($head)` → `\($base)`\n\($stats)\($cc)"
+                  }
+                }]
+                # Slack rejects an actions block with no elements, so add it only with a Jira link.
+                + (if $jira != "" then
+                    [{
+                      type: "actions",
+                      elements: [{ type: "button", text: { type: "plain_text", text: "Ticket \($ticket)" }, url: $jira }]
+                    }]
+                  else [] end)
+              )
+            }')
+
+          curl -sS --fail -X POST -H 'Content-Type: application/json' \
+            --data "${PAYLOAD}" "${SLACK_WEBHOOK_URL}"
