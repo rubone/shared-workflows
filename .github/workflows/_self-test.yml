@@ -1,5 +1,5 @@
-# Validates changes to this repo on every PR. Not reusable: it is the only workflow
-# here that runs on its own.
+# Validates changes to this repo on every PR: lints every workflow and calls each
+# reusable workflow from the current branch (call mode). Not meant to be copied.
 name: Self-test
 
 on:
@@ -31,3 +31,18 @@ jobs:
     with:
       jira_base_url: 'https://example.atlassian.net'
       slack_mention_ids: 'U01ABCDEFG'
+
+  # Smoke test of call mode. The nested job needs pull-requests: write (PR comment),
+  # so the calling job must grant it. warn_only keeps it from blocking PRs here.
+  # On a repo without dependency review support, `detect` skips it with a warning.
+  dependency-review:
+    name: Dependency review (smoke test)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/dependency-review.yml
+    with:
+      fail_on_severity: 'high'
+      comment_summary: 'never'
+      warn_only: true

@@ -16,5 +16,8 @@ changes to inputs, secrets or behavior require a new major version.
 - `SLACK_MENTION_IDS` defaults to `''` instead of an empty YAML value.
 
 ### Added
+- `dependency-review.yml`: blocks PRs that add vulnerable dependencies, with optional license
+  allow list. Copy and call modes; a `detect` job skips it with a warning on repos without
+  dependency review support. Uses `actions/dependency-review-action` v5.0.0 pinned by SHA.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.

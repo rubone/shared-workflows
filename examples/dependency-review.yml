@@ -1,0 +1,26 @@
+# Call mode: copy to .github/workflows/dependency-review.yml in the project repo.
+# For other organizations, copy .github/workflows/dependency-review.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/dependency-review.md
+name: Dependency review
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+
+permissions: {}
+
+jobs:
+  dependency-review:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      contents: read
+      pull-requests: write   # PR comment; drop it if comment_summary is 'never'
+    uses: rubone/shared-workflows/.github/workflows/dependency-review.yml@v1
+    with:
+      fail_on_severity: 'moderate'           # low | moderate | high | critical
+      fail_on_scopes: 'runtime'              # runtime, development, unknown
+      allow_licenses: ''                     # e.g. 'MIT, Apache-2.0'; '' = no license check
+      allow_ghsas: ''                        # advisories accepted as risk
+      comment_summary: 'on-failure'          # always | on-failure | never
+      warn_only: false                       # true = report only, never fail

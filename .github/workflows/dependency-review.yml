@@ -1,0 +1,143 @@
+# Dependency review: blocks PRs that add dependencies with known vulnerabilities
+# (and, optionally, licenses outside an allow list). Uses GitHub's dependency graph
+# through actions/dependency-review-action; no build or checkout needed.
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The `pull_request` trigger runs it; `workflow_call` is ignored.
+#
+#   B) CALL (repos of the same owner as rubone/shared-workflows)
+#      jobs:
+#        dependency-review:
+#          permissions: { contents: read, pull-requests: write }
+#          uses: rubone/shared-workflows/.github/workflows/dependency-review.yml@v1
+#          with: { fail_on_severity: high }
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Requirements: dependency graph enabled. Public repos: free. Private repos: needs
+# GitHub Advanced Security / Code Security. When the repo doesn't support it, the
+# `detect` job leaves a warning and the review is skipped (run stays green).
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/dependency-review.md
+name: Dependency review
+
+on:
+  # A) Copy mode: runs on every PR to main in the repo that holds this file.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      fail_on_severity:
+        description: "Lowest severity that fails the check: low, moderate, high or critical. Overrides env.FAIL_ON_SEVERITY."
+        type: string
+        required: false
+        default: ''
+      fail_on_scopes:
+        description: "Comma-separated dependency scopes to check: runtime, development, unknown. Overrides env.FAIL_ON_SCOPES."
+        type: string
+        required: false
+        default: ''
+      allow_licenses:
+        description: "Comma-separated SPDX licenses allowed (e.g. 'MIT, Apache-2.0'). Empty = no license check. Overrides env.ALLOW_LICENSES."
+        type: string
+        required: false
+        default: ''
+      allow_ghsas:
+        description: "Comma-separated GitHub Advisory IDs to ignore (accepted risks). Overrides env.ALLOW_GHSAS."
+        type: string
+        required: false
+        default: ''
+      comment_summary:
+        description: "Post the summary as a PR comment: always, on-failure or never. Overrides env.COMMENT_SUMMARY."
+        type: string
+        required: false
+        default: ''
+      warn_only:
+        description: "true = report findings but never fail. false falls back to env.WARN_ONLY."
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Lowest severity that fails the PR: low | moderate | high | critical.
+  FAIL_ON_SEVERITY: 'moderate'
+  # Dependency scopes to check, comma-separated: runtime, development, unknown.
+  FAIL_ON_SCOPES: 'runtime'
+  # SPDX licenses allowed, comma-separated (e.g. 'MIT, Apache-2.0, BSD-3-Clause').
+  # Leave empty to skip the license check.
+  ALLOW_LICENSES: ''
+  # Advisories to ignore, comma-separated (e.g. 'GHSA-xxxx-xxxx-xxxx'). Document why.
+  ALLOW_GHSAS: ''
+  # PR comment with the summary: always | on-failure | never.
+  COMMENT_SUMMARY: 'on-failure'
+  # 'true' = report only, never fail the PR (useful while adopting it).
+  WARN_ONLY: 'false'
+
+jobs:
+  # Checks that this repo supports dependency review, so unsupported repos
+  # (e.g. private without Advanced Security) get a warning instead of a red PR.
+  detect:
+    name: Check dependency review support
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      supported: ${{ steps.check.outputs.supported }}
+    steps:
+      - name: Check dependency graph API
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BASE_SHA}" ] || [ -z "${HEAD_SHA}" ]; then
+            echo "::warning::Dependency review only runs on pull_request events; skipping."
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if out=$(gh api "repos/${REPO}/dependency-graph/compare/${BASE_SHA}...${HEAD_SHA}" --silent 2>&1); then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 403/404 = feature not available for this repo (no Advanced Security, or
+          # dependency graph disabled). Anything else is a real error: fail.
+          if printf '%s' "${out}" | grep -qE 'HTTP (403|404)'; then
+            echo "::warning::Dependency review is not available for ${REPO} (dependency graph disabled, or a private repo without GitHub Advanced Security). Skipping. API said: ${out}"
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::error::Dependency graph API call failed: ${out}"
+          exit 1
+
+  review:
+    name: Dependency review
+    needs: detect
+    if: needs.detect.outputs.supported == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # PR comment (COMMENT_SUMMARY); unused with 'never'
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: ${{ inputs.fail_on_severity || env.FAIL_ON_SEVERITY }}
+          fail-on-scopes: ${{ inputs.fail_on_scopes || env.FAIL_ON_SCOPES }}
+          allow-licenses: ${{ inputs.allow_licenses || env.ALLOW_LICENSES }}
+          allow-ghsas: ${{ inputs.allow_ghsas || env.ALLOW_GHSAS }}
+          comment-summary-in-pr: ${{ inputs.comment_summary || env.COMMENT_SUMMARY }}
+          warn-only: ${{ inputs.warn_only || env.WARN_ONLY }}
