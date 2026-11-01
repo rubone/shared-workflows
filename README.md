@@ -37,6 +37,7 @@ shared-workflows/
 | Workflow | What it does | Docs | Example |
 |---|---|---|---|
 | [`pr_slack_notify.yml`](.github/workflows/pr_slack_notify.yml) | Posts a Slack message when a PR is opened or leaves draft, with a Jira ticket button and owner mentions. | [docs](docs/pr-slack-notification.md) | [caller](examples/pr-slack-notify.yml) |
+| [`dependency-review.yml`](.github/workflows/dependency-review.yml) | Fails PRs that add dependencies with known vulnerabilities (and, optionally, disallowed licenses). Skips with a warning where the repo doesn't support it. | [docs](docs/dependency-review.md) | [caller](examples/dependency-review.yml) |
 
 ## Usage
 
