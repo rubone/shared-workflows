@@ -1,15 +1,20 @@
 # Changelog
 
 All notable changes to this repo are listed here. Versions follow
-[Semantic Versioning](https://semver.org/): changes that require editing a copied file
-(new or renamed `env` values or secrets) bump the major version.
+[Semantic Versioning](https://semver.org/): callers pin a major tag (`@v1`), so breaking
+changes to inputs, secrets or behavior require a new major version.
 
 ## [Unreleased]
 
 ### Changed
-- Workflows moved from `.github/workflows/` to `workflows/`, so they no longer run in this
-  repo. The repo is now a library: copy a file into `.github/workflows/` of the target repo.
-- `pr_slack_notify.yml`: `SLACK_MENTION_IDS` defaults to `''` instead of an empty YAML value.
+- `pr_slack_notify.yml` works in two modes from the same file:
+  - **Copy:** keeps its `pull_request` trigger; set `JIRA_BASE_URL` and `SLACK_MENTION_IDS`
+    in the top-level `env:` block (unchanged from before).
+  - **Call:** new `on: workflow_call` with inputs `jira_base_url` and `slack_mention_ids`
+    (override the `env` values) and the optional `SLACK_PR_WEBHOOK_URL` secret. Caller sample
+    in `examples/pr-slack-notify.yml`.
+- `SLACK_MENTION_IDS` defaults to `''` instead of an empty YAML value.
 
 ### Added
+- `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.
