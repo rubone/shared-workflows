@@ -19,5 +19,9 @@ changes to inputs, secrets or behavior require a new major version.
 - `dependency-review.yml`: blocks PRs that add vulnerable dependencies, with optional license
   allow list. Copy and call modes; a `detect` job skips it with a warning on repos without
   dependency review support. Uses `actions/dependency-review-action` v5.0.0 pinned by SHA.
+- `secret-scan.yml`: fails when commits contain secrets, using the gitleaks CLI 8.30.1
+  (pinned by checksum, no license key). Scans only the PR's or push's new commits; a manual
+  run scans the whole history. Findings show as annotations and in the job summary,
+  redacted. Copy and call modes.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.
