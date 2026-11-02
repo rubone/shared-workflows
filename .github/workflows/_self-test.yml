@@ -46,3 +46,14 @@ jobs:
       fail_on_severity: 'high'
       comment_summary: 'never'
       warn_only: true
+
+  # Smoke test of call mode on this repo's own PR commits. warn_only keeps a finding
+  # from blocking PRs here; the job summary still lists it.
+  secret-scan:
+    name: Secret scan (smoke test)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/secret-scan.yml
+    with:
+      warn_only: true
