@@ -4,8 +4,8 @@ Workflow that checks the dependencies a pull request adds or changes and fails t
 has a known vulnerability at or above a chosen severity. It can also enforce a license allow
 list. It reads GitHub's dependency graph through
 [`actions/dependency-review-action`](https://github.com/actions/dependency-review-action), so it
-works for any stack the dependency graph understands (npm, NuGet, Gradle/Maven, pub, and more)
-without building the project.
+doesn't build the project. It only sees what the dependency graph can read: coverage depends on
+the stack (see [Coverage by stack](#coverage-by-stack)).
 
 - Workflow: [`.github/workflows/dependency-review.yml`](../.github/workflows/dependency-review.yml)
 - Caller sample (call mode): [`examples/dependency-review.yml`](../examples/dependency-review.yml)
@@ -24,6 +24,29 @@ without building the project.
 
 The dependency graph must be enabled: **Settings → Code security → Dependency graph**. It is on
 by default for public repos.
+
+---
+
+## Coverage by stack
+
+The dependency graph reads some manifests by itself (static parsing). Others need a build step
+that sends the resolved dependencies to GitHub (*dependency submission*). Source:
+[Dependency graph supported package ecosystems](https://docs.github.com/en/code-security/reference/supply-chain-security/dependency-graph-supported-package-ecosystems).
+
+| Stack | Files read | Coverage | To improve it |
+|---|---|---|---|
+| Node / TypeScript, React, Angular | `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` (+ `package.json`) | ✅ Direct and transitive | Commit the lockfile. pnpm 12's two-document `pnpm-lock.yaml` isn't detected. |
+| .NET (NuGet) | `.csproj`, `.fsproj`, `.vbproj`, `.nuspec`, `packages.config` | ⚠️ Direct only | Transitive dependencies need dependency submission: turn on **Settings → Code security → Automatic dependency submission**. |
+| Android (Gradle) | — | ❌ Nothing by static parsing | Dependency submission is required: automatic (setting above) or [`gradle/actions/dependency-submission`](https://github.com/gradle/actions) in the CI. Planned for `android-ci`. |
+| Java (Maven) | `pom.xml` | ✅ Direct and transitive | — |
+| Flutter / Dart (pub) | `pubspec.lock` (+ `pubspec.yaml`) | ⚠️ Read, but few advisories exist for pub | Little to gain; keep the lockfile committed. |
+| GitHub Actions | `uses:` in `.github/workflows/*.yml` | ✅ Actions and reusable workflows | — |
+| Docker images | — | ❌ Not covered | Use an image scanner (`trivy-scan`, planned). |
+| Infrastructure (Bicep, Terraform) | — | ❌ Not covered | Out of scope. |
+
+With dependency submission, the review compares the snapshots submitted for the PR's base and
+head. If the PR's snapshot isn't there yet when the review runs, the action warns that the
+results may be incomplete; the action's `retry-on-snapshot-warnings` option waits for it.
 
 ---
 
@@ -138,6 +161,7 @@ A PR that changes no dependency files passes with *"No dependency changes found"
 | Warning `Dependency review is not available for …`, review skipped | Private repo without Advanced Security, or dependency graph disabled | Enable the dependency graph, or Advanced Security / Code Security for private repos |
 | Run fails at startup: `nested job … is requesting 'pull-requests: write', but is only allowed 'none'` | Call mode: the caller didn't grant permissions | Add `permissions: { contents: read, pull-requests: write }` to the calling job |
 | `detect` fails with `Dependency graph API call failed` | GitHub API error other than 403/404 | Re-run the job; check [githubstatus.com](https://www.githubstatus.com) |
+| Doesn't flag a known-vulnerable package in an Android or .NET project | The dependency graph doesn't see it (Gradle) or sees only direct dependencies (NuGet) | See [Coverage by stack](#coverage-by-stack) |
 | Fails on a dev-only package | `FAIL_ON_SCOPES` includes `development` | Set it to `runtime` |
 | Fails on a vulnerability with no fix yet | Severity at or above `FAIL_ON_SEVERITY` | Add the advisory to `ALLOW_GHSAS` with a reason, or raise the severity |
 | Fails with `Invalid license(s) in allow-licenses` | A name that isn't an SPDX ID (e.g. `Apache 2`) | Use SPDX IDs: `Apache-2.0`, `MIT`, `BSD-3-Clause` |
@@ -147,5 +171,6 @@ A PR that changes no dependency files passes with *"No dependency changes found"
 ## Possible extensions
 
 - `deny-packages` / `deny-groups` to block specific packages.
+- Input for `retry-on-snapshot-warnings`, for repos that use dependency submission.
 - `show-openssf-scorecard` to add OpenSSF Scorecard scores to the summary.
 - A shared `config-file` in this repo, so every project reads the same policy.
