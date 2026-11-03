@@ -39,6 +39,7 @@ shared-workflows/
 | [`pr_slack_notify.yml`](.github/workflows/pr_slack_notify.yml) | Posts a Slack message when a PR is opened or leaves draft, with a Jira ticket button and owner mentions. | [docs](docs/pr-slack-notification.md) | [caller](examples/pr-slack-notify.yml) |
 | [`dependency-review.yml`](.github/workflows/dependency-review.yml) | Fails PRs that add dependencies with known vulnerabilities (and, optionally, disallowed licenses). Skips with a warning where the repo doesn't support it. | [docs](docs/dependency-review.md) | [caller](examples/dependency-review.yml) |
 | [`secret-scan.yml`](.github/workflows/secret-scan.yml) | Fails PRs and pushes that commit secrets (tokens, keys, connection strings) using gitleaks. Works in private repos without Advanced Security. | [docs](docs/secret-scan.md) | [caller](examples/secret-scan.yml) |
+| [`codeql.yml`](.github/workflows/codeql.yml) | CodeQL static analysis for security bugs. Detects the languages (C#, JS/TS, Java/Kotlin, Python, Actions) and analyzes each in parallel. Skips with a warning where code scanning isn't available. | [docs](docs/codeql.md) | [caller](examples/codeql.yml) |
 
 ## Usage
 

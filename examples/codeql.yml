@@ -1,0 +1,29 @@
+# Call mode: copy to .github/workflows/codeql.yml in the project repo.
+# For other organizations, copy .github/workflows/codeql.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/codeql.md
+name: CodeQL
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '27 4 * * 1'   # weekly
+
+permissions: {}
+
+jobs:
+  codeql:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      contents: read
+      security-events: write   # upload results to code scanning
+      actions: read            # needed by CodeQL in private repos
+    uses: rubone/shared-workflows/.github/workflows/codeql.yml@v1
+    with:
+      languages: ''         # '' = detect; or e.g. 'csharp,javascript-typescript,actions'
+      queries: ''           # '' (default) | security-extended | security-and-quality
+      java_build_mode: ''   # '' = auto | none | autobuild
