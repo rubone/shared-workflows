@@ -23,5 +23,9 @@ changes to inputs, secrets or behavior require a new major version.
   (pinned by checksum, no license key). Scans only the PR's or push's new commits; a manual
   run scans the whole history. Findings show as annotations and in the job summary,
   redacted. Copy and call modes.
+- `codeql.yml`: CodeQL code scanning (`github/codeql-action` v4.39.1 pinned by SHA). Detects
+  languages from the repo's files and runs one job per language; Kotlin uses autobuild, the
+  rest build mode `none`. A `detect` job skips it with a warning where code scanning isn't
+  available. Copy and call modes.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.

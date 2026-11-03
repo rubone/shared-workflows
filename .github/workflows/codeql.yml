@@ -1,0 +1,210 @@
+# CodeQL: static analysis that finds security bugs in the code (injection, XSS, unsafe
+# deserialization, hardcoded credentials, path traversal...) and in the GitHub Actions
+# workflows themselves. Results show up as code scanning alerts in the Security tab and
+# as annotations on the PR.
+#
+# Languages are detected from the repo's files (C#, JavaScript/TypeScript, Java/Kotlin,
+# Python, GitHub Actions); one parallel job per language. Dart/Flutter isn't supported
+# by CodeQL.
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The pull_request / push / schedule triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (repos of the same owner as rubone/shared-workflows)
+#      jobs:
+#        codeql:
+#          permissions: { contents: read, security-events: write, actions: read }
+#          uses: rubone/shared-workflows/.github/workflows/codeql.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Requirements: code scanning. Public repos: free. Private repos: needs GitHub Code
+# Security / Advanced Security (CodeQL's license doesn't allow analyzing private code
+# without it). When the repo doesn't support it, the `detect` job leaves a warning and
+# the analysis is skipped (run stays green).
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/codeql.md
+name: CodeQL
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '27 4 * * 1'   # weekly (Monday 04:27 UTC): catches new queries and advisories
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      languages:
+        description: "Comma-separated CodeQL languages (e.g. 'csharp,actions'). Empty = detect from the repo's files. Overrides env.LANGUAGES."
+        type: string
+        required: false
+        default: ''
+      queries:
+        description: "Query suite: '' (default), security-extended or security-and-quality. Overrides env.QUERIES."
+        type: string
+        required: false
+        default: ''
+      java_build_mode:
+        description: "Build mode for java-kotlin: '' (auto: autobuild if there are Kotlin files, else none), none or autobuild. Overrides env.JAVA_BUILD_MODE."
+        type: string
+        required: false
+        default: ''
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # CodeQL languages, comma-separated. Empty = detect from the repo's files.
+  # Supported here: actions, csharp, go, java-kotlin, javascript-typescript, python, ruby.
+  LANGUAGES: ''
+  # Query suite: '' (default: few false positives), security-extended (more security
+  # queries, more noise) or security-and-quality (adds maintainability queries).
+  QUERIES: ''
+  # java-kotlin build mode: '' = auto (autobuild when there are .kt files, since Kotlin
+  # can't be analyzed without a build; none for Java only), none or autobuild.
+  JAVA_BUILD_MODE: ''
+
+jobs:
+  # Checks that the repo supports code scanning and picks the languages to analyze.
+  detect:
+    name: Detect languages and support
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: read   # code scanning API
+    outputs:
+      matrix: ${{ steps.languages.outputs.matrix }}
+    steps:
+      - name: Check code scanning support
+        id: support
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # 200 = has analyses; 404 "no analysis found" = enabled, nothing uploaded yet.
+          if out=$(gh api "repos/${REPO}/code-scanning/analyses?per_page=1" --silent 2>&1) \
+             || printf '%s' "${out}" | grep -q 'no analysis found'; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 403 "not enabled" = private repo without Code Security / Advanced Security.
+          if printf '%s' "${out}" | grep -qiE 'not enabled|must be enabled|Advanced Security'; then
+            echo "::warning::Code scanning is not available for ${REPO} (private repo without GitHub Code Security / Advanced Security, or code scanning disabled). Skipping CodeQL. API said: ${out}"
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Anything else (e.g. missing security-events permission) is a real error.
+          echo "::error::Code scanning API call failed: ${out}"
+          exit 1
+
+      - name: Checkout
+        if: steps.support.outputs.supported == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pick languages
+        id: languages
+        env:
+          SUPPORTED: ${{ steps.support.outputs.supported }}
+          LANGUAGES: ${{ inputs.languages || env.LANGUAGES }}
+          JAVA_BUILD_MODE: ${{ inputs.java_build_mode || env.JAVA_BUILD_MODE }}
+        run: |
+          set -euo pipefail
+
+          if [ "${SUPPORTED}" != "true" ]; then
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Counts tracked files matching the given git pathspecs.
+          count() { git ls-files -- "$@" | wc -l | tr -d ' '; }
+
+          # In a Flutter app, android/ only holds the generated host app (MainActivity.kt):
+          # leave it out so it doesn't trigger a Kotlin build of the Flutter project.
+          java_excl=()
+          if [ -f pubspec.yaml ]; then
+            java_excl=(':(exclude)android/**')
+          fi
+          kotlin_files=$(count '*.kt' ${java_excl[@]+"${java_excl[@]}"})
+
+          if [ -z "${LANGUAGES}" ]; then
+            langs=()
+            [ "$(count '*.cs' '*.csproj')" -gt 0 ] && langs+=(csharp)
+            [ "$(count '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx' '*.mts' '*.cts' '*.vue')" -gt 0 ] \
+              && langs+=(javascript-typescript)
+            [ "$(count '*.java' '*.kt' ${java_excl[@]+"${java_excl[@]}"})" -gt 0 ] && langs+=(java-kotlin)
+            [ "$(count '*.py')" -gt 0 ] && langs+=(python)
+            [ "$(count '.github/workflows/*.yml' '.github/workflows/*.yaml')" -gt 0 ] && langs+=(actions)
+            LANGUAGES=$(IFS=,; echo "${langs[*]-}")
+            echo "Detected languages: ${LANGUAGES:-none}"
+          else
+            echo "Languages from configuration: ${LANGUAGES}"
+          fi
+
+          matrix='[]'
+          for lang in ${LANGUAGES//,/ }; do
+            case "${lang}" in
+              actions|csharp|javascript-typescript|python|ruby) mode=none ;;
+              go) mode=autobuild ;;
+              java-kotlin)
+                case "${JAVA_BUILD_MODE}" in
+                  none|autobuild) mode="${JAVA_BUILD_MODE}" ;;
+                  '') if [ "${kotlin_files}" -gt 0 ]; then mode=autobuild; else mode=none; fi ;;
+                  *) echo "::error::Invalid java_build_mode '${JAVA_BUILD_MODE}' (use none or autobuild)."; exit 1 ;;
+                esac ;;
+              *)
+                echo "::error::Language '${lang}' isn't supported by this workflow. Use: actions, csharp, go, java-kotlin, javascript-typescript, python, ruby."
+                exit 1 ;;
+            esac
+            matrix=$(jq -c --arg l "${lang}" --arg m "${mode}" '. + [{language: $l, build_mode: $m}]' <<< "${matrix}")
+          done
+
+          if [ "${matrix}" = "[]" ]; then
+            echo "::warning::No languages to analyze; skipping CodeQL."
+          fi
+          echo "Matrix: ${matrix}"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    needs: detect
+    if: needs.detect.outputs.matrix != '[]' && needs.detect.outputs.matrix != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      security-events: write   # upload results to code scanning
+      actions: read            # needed by CodeQL in private repos
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build_mode }}   # autobuild runs during analyze
+          queries: ${{ inputs.queries || env.QUERIES }}
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:${{ matrix.language }}
