@@ -1,0 +1,28 @@
+# Call mode: copy to .github/workflows/stale.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy .github/workflows/stale.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/stale.md
+name: Stale
+
+on:
+  schedule:
+    - cron: '30 1 * * *'   # daily, 01:30 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  stale:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      issues: write
+      pull-requests: write
+      actions: write   # actions/stale keeps its progress in the Actions cache
+    uses: rubone/shared-workflows/.github/workflows/stale.yml@v1
+    with:
+      days_before_issue_stale: 60
+      days_before_issue_close: 14    # -1 = never close
+      days_before_pr_stale: 30
+      days_before_pr_close: 14
+      exempt_labels: 'pinned,security,keep-open'
+      exempt_draft_pr: false
+      dry_run: true                  # start with true, check the log, then set false

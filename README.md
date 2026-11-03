@@ -42,6 +42,7 @@ shared-workflows/
 | [`secret-scan.yml`](.github/workflows/secret-scan.yml) | Fails PRs and pushes that commit secrets (tokens, keys, connection strings) using gitleaks. Works in private repos without Advanced Security. | [docs](docs/secret-scan.md) | [caller](examples/secret-scan.yml) |
 | [`codeql.yml`](.github/workflows/codeql.yml) | CodeQL static analysis for security bugs. Detects the languages (C#, JS/TS, Java/Kotlin, Python, Actions) and analyzes each in parallel. Skips with a warning where code scanning isn't available. | [docs](docs/codeql.md) | [caller](examples/codeql.yml) |
 | [`pr-checks.yml`](.github/workflows/pr-checks.yml) | Checks that the PR title follows Conventional Commits, and labels the PR by size (`size/XS`…`size/XL`) and by changed paths. | [docs](docs/pr-checks.md) | [caller](examples/pr-checks.yml), [labeler](examples/labeler.yml) |
+| [`stale.yml`](.github/workflows/stale.yml) | Daily: marks issues and PRs with no activity as `stale` and closes them later if nothing happens. Dry-run mode to try it safely. | [docs](docs/stale.md) | [caller](examples/stale.yml) |
 
 ### Repo settings each workflow needs
 
@@ -55,6 +56,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `secret-scan.yml` | Nothing | — | — |
 | `codeql.yml` | **Code scanning** available, with CodeQL **default setup off** | Free, nothing to enable | Needs GitHub Code Security / Advanced Security |
 | `pr-checks.yml` | Optional `.github/labeler.yml` for path labels. Recommended: squash merge only, with the PR title as commit message | — | — |
+| `stale.yml` | Nothing | — | — |
 
 Recommended, though no workflow depends on them:
 
