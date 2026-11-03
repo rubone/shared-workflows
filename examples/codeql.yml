@@ -1,5 +1,5 @@
 # Call mode: copy to .github/workflows/codeql.yml in the project repo.
-# For other organizations, copy .github/workflows/codeql.yml instead (copy mode).
+# To not depend on this repo (or if the org blocks external workflows), copy .github/workflows/codeql.yml instead (copy mode).
 # Docs: https://github.com/rubone/shared-workflows/blob/main/docs/codeql.md
 name: CodeQL
 

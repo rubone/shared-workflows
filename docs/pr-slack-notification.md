@@ -2,7 +2,7 @@
 
 Workflow that posts a message to a Slack channel when a pull request is opened. It is a
 single self-contained file that you can **copy as-is into any repo, in any organization**, or
-**call** as a reusable workflow from repos of the same owner. The repo name and URLs are read
+**call** as a reusable workflow from any repo. The repo name and URLs are read
 from the event payload. If the branch name contains a Jira ticket, the message includes a button
 that opens that ticket in Jira. The repo's project owner(s) can be tagged in Slack (`cc @owner`).
 
@@ -19,7 +19,7 @@ The same file supports two modes. Pick one per repo.
 
 | | A) Copy (main use) | B) Call |
 |---|---|---|
-| Works for | Any repo, any organization | Repos of the same owner as `rubone/shared-workflows` (or any repo, if this one is public) |
+| Works for | Any repo, any organization | Any repo, any organization whose Actions policy allows workflows from `rubone/shared-workflows` |
 | What goes in the project repo | The whole `pr_slack_notify.yml` | A ~20-line caller ([example](../examples/pr-slack-notify.yml)) |
 | Where values go | Top-level `env:` of the copied file | `with:` inputs in the caller |
 | Trigger | `on.pull_request` in the copied file | `on:` in the caller |
@@ -68,8 +68,8 @@ jobs:
 ```
 
 Pin a version tag (`@v1`) or a commit SHA, not `@main`, so changes here don't break callers.
-`secrets: inherit` also works instead of passing the secret explicitly. If this repo is
-private, see [the access note](#adding-it-to-more-repos).
+`secrets: inherit` also works instead of passing the secret explicitly. If the caller's
+organization restricts actions, see [the access note](#adding-it-to-more-repos).
 
 #### Inputs
 
@@ -358,7 +358,7 @@ The repo name, repo URL and PR URLs come from `github.event.repository` /
 
 1. Add the workflow, either:
    - **Copy mode** (any org): copy `.github/workflows/pr_slack_notify.yml` and edit its `env:` block.
-   - **Call mode** (same owner): copy [`examples/pr-slack-notify.yml`](../examples/pr-slack-notify.yml)
+   - **Call mode** (any org): copy [`examples/pr-slack-notify.yml`](../examples/pr-slack-notify.yml)
      and edit its `with:` block.
 2. Make `SLACK_PR_WEBHOOK_URL` available to it, either:
    - **Org secret** (recommended): GitHub org → **Settings → Secrets and variables → Actions →
@@ -373,9 +373,10 @@ The repo name, repo URL and PR URLs come from `github.event.repository` /
 Each organization needs its own Slack webhook (or reuses one) and its own secret: secrets are
 never shared across organizations.
 
-**Call mode and private repos:** if `shared-workflows` is private, only repos of the same owner
-can call it, and this repo needs **Settings → Actions → General → Access** set to allow them.
-Otherwise the caller fails with "workflow was not found". For other organizations, use copy mode.
+**Call mode and organization policies:** `shared-workflows` is public, so any repo can call it.
+But an organization can limit which actions and reusable workflows its repos use (**Settings →
+Actions → General → Policies**). If it only allows its own or selected ones, add
+`rubone/shared-workflows/*` to the allow list, or use copy mode.
 
 ## Troubleshooting
 
@@ -389,8 +390,9 @@ Otherwise the caller fails with "workflow was not found". For other organization
 | Warning `SLACK_MENTION_IDS entry '…' is not a Slack member ID` | A username or name instead of the ID | Replace it with the member ID (`U…`) |
 | `cc` line shows but nobody gets notified | ID belongs to another workspace, or the user left | Copy the member ID again from Slack |
 | No run at all | PR is a draft, or its base isn't in `on.pull_request.branches` | Mark it ready for review / retarget it |
-| Caller fails with `workflow was not found` | Wrong path/ref in `uses:`, or this repo is private and doesn't allow access | Check the `uses:` line and Settings → Actions → General → Access, or switch to copy mode |
-| No message for a PR from a fork | Secrets aren't passed to fork PRs on `pull_request` | Not expected in this private repo. If needed, switch to `pull_request_target` (safe here, since there's no checkout) |
+| Caller fails with `workflow was not found` | Wrong path or ref in `uses:` (e.g. a tag that doesn't exist yet) | Check the `uses:` line |
+| Caller fails with `… is not allowed to be used in …` | The caller's organization policy blocks workflows from other owners | Allow `rubone/shared-workflows/*` in the org's Actions policies, or switch to copy mode |
+| No message for a PR from a fork (job green with the secret warning) | Secrets aren't passed to fork PRs on `pull_request` | Expected. If fork PRs must notify too, switch to `pull_request_target` (safe here, since there's no checkout) |
 
 ## Possible extensions
 

@@ -8,7 +8,7 @@
 #      3. Add the repo (or org) secret SLACK_PR_WEBHOOK_URL = Slack Incoming Webhook URL.
 #      The `pull_request` trigger runs it; `workflow_call` is ignored.
 #
-#   B) CALL (repos of the same owner as rubone/shared-workflows)
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
 #      uses: rubone/shared-workflows/.github/workflows/pr_slack_notify.yml@v1
 #      with: { jira_base_url: ..., slack_mention_ids: ... }
 #      secrets: { SLACK_PR_WEBHOOK_URL: ... }
