@@ -56,7 +56,7 @@ The same file supports two modes. Pick one per repo.
 
 | | A) Copy (main use) | B) Call |
 |---|---|---|
-| Works for | Any repo, any organization | Repos of the same owner as `rubone/shared-workflows` (or any repo, if this one is public) |
+| Works for | Any repo, any organization | Any repo, any organization whose Actions policy allows workflows from `rubone/shared-workflows` |
 | What goes in the project repo | The whole `dependency-review.yml` | A short caller ([example](../examples/dependency-review.yml)) |
 | Where values go | Top-level `env:` of the copied file | `with:` inputs in the caller |
 | Trigger | `on.pull_request` in the copied file | `on:` in the caller |

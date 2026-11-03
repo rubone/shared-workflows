@@ -9,7 +9,7 @@
 #      2. Edit the values under `env:` below if the defaults don't fit.
 #      The `pull_request` trigger runs it; `workflow_call` is ignored.
 #
-#   B) CALL (repos of the same owner as rubone/shared-workflows)
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
 #      jobs:
 #        dependency-review:
 #          permissions: { contents: read, pull-requests: write }

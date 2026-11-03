@@ -60,8 +60,8 @@ jobs:
     with:
       warn_only: true
 
-  # Smoke test of call mode. On a repo without code scanning support (this one is
-  # private), `detect` skips the analysis with a warning.
+  # Smoke test of call mode (here it analyzes only `actions`). On a repo without code
+  # scanning support, `detect` skips the analysis with a warning.
   codeql:
     name: CodeQL (smoke test)
     if: github.event_name == 'pull_request'
