@@ -70,3 +70,13 @@ jobs:
       security-events: write
       actions: read
     uses: ./.github/workflows/codeql.yml
+
+  # Smoke test of call mode: checks this PR's title and labels it by size and paths.
+  pr-checks:
+    name: PR checks (smoke test)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/pr-checks.yml

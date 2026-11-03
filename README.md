@@ -41,6 +41,7 @@ shared-workflows/
 | [`dependency-review.yml`](.github/workflows/dependency-review.yml) | Fails PRs that add dependencies with known vulnerabilities (and, optionally, disallowed licenses). Skips with a warning where the repo doesn't support it. | [docs](docs/dependency-review.md) | [caller](examples/dependency-review.yml) |
 | [`secret-scan.yml`](.github/workflows/secret-scan.yml) | Fails PRs and pushes that commit secrets (tokens, keys, connection strings) using gitleaks. Works in private repos without Advanced Security. | [docs](docs/secret-scan.md) | [caller](examples/secret-scan.yml) |
 | [`codeql.yml`](.github/workflows/codeql.yml) | CodeQL static analysis for security bugs. Detects the languages (C#, JS/TS, Java/Kotlin, Python, Actions) and analyzes each in parallel. Skips with a warning where code scanning isn't available. | [docs](docs/codeql.md) | [caller](examples/codeql.yml) |
+| [`pr-checks.yml`](.github/workflows/pr-checks.yml) | Checks that the PR title follows Conventional Commits, and labels the PR by size (`size/XS`…`size/XL`) and by changed paths. | [docs](docs/pr-checks.md) | [caller](examples/pr-checks.yml), [labeler](examples/labeler.yml) |
 
 ### Repo settings each workflow needs
 
@@ -53,6 +54,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `dependency-review.yml` | **Dependency graph** enabled | Free. Usually on, but check it: a repo turned from private to public may have it off. | Needs GitHub Code Security / Advanced Security |
 | `secret-scan.yml` | Nothing | — | — |
 | `codeql.yml` | **Code scanning** available, with CodeQL **default setup off** | Free, nothing to enable | Needs GitHub Code Security / Advanced Security |
+| `pr-checks.yml` | Optional `.github/labeler.yml` for path labels. Recommended: squash merge only, with the PR title as commit message | — | — |
 
 Recommended, though no workflow depends on them:
 

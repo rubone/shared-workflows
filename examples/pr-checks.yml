@@ -1,0 +1,29 @@
+# Call mode: copy to .github/workflows/pr-checks.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy .github/workflows/pr-checks.yml instead (copy mode).
+# Optional: add .github/labeler.yml for path labels (start from examples/labeler.yml).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/pr-checks.md
+name: PR checks
+
+on:
+  # pull_request_target (not pull_request) so PRs from forks can be labeled too. Safe here:
+  # the workflow never checks out or runs the PR's code.
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+    branches:
+      - main   # change if the repo's default branch isn't main
+
+permissions: {}
+
+jobs:
+  pr-checks:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      contents: read         # labeler config
+      pull-requests: write   # add/remove labels
+      issues: write          # create labels
+    uses: rubone/shared-workflows/.github/workflows/pr-checks.yml@v1
+    with:
+      title_types: 'feat,fix,docs,style,refactor,perf,test,build,ci,chore,revert'
+      require_scope: 'false'
+      size_thresholds: '10,30,100,500'   # where S, M, L, XL start; 'off' = no size label
+      labeler_config: '.github/labeler.yml'

@@ -1,0 +1,270 @@
+# PR checks: keeps pull requests consistent.
+#   - PR title:     must follow Conventional Commits (`feat: add login`, `fix(api): …`), so the
+#                   squash-merge commit on main is parseable by release tooling.
+#   - Size label:   size/XS … size/XL from the lines changed (lockfiles and generated code ignored).
+#   - Path labels:  labels from the changed paths, using the project's .github/labeler.yml
+#                   (skipped with a notice if the file doesn't exist).
+#
+# Runs on `pull_request_target` so it can label PRs from forks too. That is safe here
+# because no job checks out or runs code from the PR: they only read the title, the list of
+# changed files and the labeler config from the base branch.
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      3. Optional: add .github/labeler.yml (example: examples/labeler.yml in shared-workflows).
+#      The `pull_request_target` trigger runs it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      on: { pull_request_target: { types: [opened, edited, synchronize, reopened, ready_for_review] } }
+#      jobs:
+#        pr-checks:
+#          permissions: { contents: read, pull-requests: write, issues: write }
+#          uses: rubone/shared-workflows/.github/workflows/pr-checks.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Recommended repo settings: Settings → General → Pull Requests → allow only squash merging,
+# with "Default commit message" = "Pull request title". Then the validated title is the commit
+# that lands on main.
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/pr-checks.md
+name: PR checks
+
+on:
+  # A) Copy mode trigger. `edited` re-checks the title when it's changed.
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+    branches:
+      - main   # change if the repo's default branch isn't main
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      title_types:
+        description: "Comma-separated Conventional Commits types allowed in the PR title. Overrides env.TITLE_TYPES."
+        type: string
+        required: false
+        default: ''
+      require_scope:
+        description: "'true' = the title needs a scope, e.g. 'feat(api): …'. Overrides env.REQUIRE_SCOPE."
+        type: string
+        required: false
+        default: ''
+      size_thresholds:
+        description: "Four comma-separated line counts where S, M, L and XL start (e.g. '10,30,100,500'). 'off' = no size label. Overrides env.SIZE_THRESHOLDS."
+        type: string
+        required: false
+        default: ''
+      size_ignore:
+        description: "Comma-separated globs of files left out of the size (matched against the path and the file name). Overrides env.SIZE_IGNORE."
+        type: string
+        required: false
+        default: ''
+      labeler_config:
+        description: "Path of the labeler config in the project repo. Overrides env.LABELER_CONFIG."
+        type: string
+        required: false
+        default: ''
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Conventional Commits types allowed in the PR title.
+  TITLE_TYPES: 'feat,fix,docs,style,refactor,perf,test,build,ci,chore,revert'
+  # 'true' = require a scope: 'feat(api): …'.
+  REQUIRE_SCOPE: 'false'
+  # Lines changed where size/S, size/M, size/L and size/XL start (below the first = size/XS).
+  # 'off' = don't add size labels.
+  SIZE_THRESHOLDS: '10,30,100,500'
+  # Files left out of the size: lockfiles and generated code.
+  SIZE_IGNORE: 'package-lock.json,yarn.lock,pnpm-lock.yaml,packages.lock.json,pubspec.lock,*.g.dart,*.freezed.dart,*.Designer.cs,*.min.js,*.snap'
+  # Labeler config (labels by changed paths). If the file doesn't exist, that job is skipped.
+  LABELER_CONFIG: '.github/labeler.yml'
+
+jobs:
+  title:
+    name: PR title
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check Conventional Commits format
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          TYPES: ${{ inputs.title_types || env.TITLE_TYPES }}
+          REQUIRE_SCOPE: ${{ inputs.require_scope || env.REQUIRE_SCOPE }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TITLE}" ]; then
+            echo "::warning::Not a pull request event; skipping the title check."
+            exit 0
+          fi
+
+          # Dependency bots use their own titles ("Bump x from 1 to 2"). To make them
+          # conventional, set `commit-message.prefix` in dependabot.yml (see the docs).
+          case "${AUTHOR}" in
+            dependabot\[bot\]|renovate\[bot\])
+              echo "::notice::PR opened by ${AUTHOR}; title check skipped."
+              exit 0 ;;
+          esac
+
+          types_re=$(printf '%s' "${TYPES}" | tr -d ' ' | sed 's/,/|/g')
+          if [ "${REQUIRE_SCOPE}" = "true" ]; then scope_q=''; else scope_q='?'; fi
+          re="^(${types_re})(\([^()[:space:]]+\))${scope_q}!?: [^[:space:]].*$"
+          revert_re='^Revert ".+"$'   # GitHub's default title for revert PRs
+
+          if [[ "${TITLE}" =~ ${re} ]] || [[ "${TITLE}" =~ ${revert_re} ]]; then
+            echo "PR title OK: ${TITLE}"
+            exit 0
+          fi
+
+          if [ "${REQUIRE_SCOPE}" = "true" ]; then fmt='type(scope): description'; else fmt='type(optional scope): description'; fi
+          echo "::error title=PR title doesn't follow Conventional Commits::Expected '${fmt}', with type one of: ${TYPES}. Got: '${TITLE}'. Edit the PR title; the check re-runs on its own."
+          {
+            echo "### ❌ PR title doesn't follow Conventional Commits"
+            echo
+            echo "Got: \`${TITLE}\`"
+            echo
+            echo "Expected \`${fmt}\`. Allowed types: \`${TYPES//,/\`, \`}\`."
+            echo
+            echo "| Example | Meaning |"
+            echo "|---|---|"
+            echo "| \`feat: add login with Google\` | New feature (minor version) |"
+            echo "| \`fix(api): handle empty cart\` | Bug fix, with scope (patch version) |"
+            echo "| \`feat!: drop support for Node 18\` | Breaking change (major version) |"
+            echo "| \`docs: update README\` | No release |"
+            echo
+            echo "Edit the PR title; this check runs again on its own."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+  size:
+    name: Size label
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write   # read changed files, add/remove labels
+      issues: write          # create the size/* labels with their colors
+    steps:
+      - name: Label PR by size
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          THRESHOLDS: ${{ inputs.size_thresholds || env.SIZE_THRESHOLDS }}
+          IGNORE: ${{ inputs.size_ignore || env.SIZE_IGNORE }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "::warning::Not a pull request event; skipping the size label."
+            exit 0
+          fi
+          if [ "${THRESHOLDS}" = "off" ]; then
+            echo "Size labels are off."
+            exit 0
+          fi
+          if ! [[ "${THRESHOLDS}" =~ ^[0-9]+,[0-9]+,[0-9]+,[0-9]+$ ]]; then
+            echo "::error::SIZE_THRESHOLDS must be four comma-separated numbers (e.g. '10,30,100,500') or 'off'. Got: '${THRESHOLDS}'."
+            exit 1
+          fi
+          IFS=, read -r t_s t_m t_l t_xl <<< "${THRESHOLDS}"
+
+          # Writes that fail with 403 mean a read-only token (e.g. a fork PR on `pull_request`).
+          api_write() {
+            local out
+            if out=$(gh api "$@" 2>&1); then return 0; fi
+            if printf '%s' "${out}" | grep -q 'already_exists'; then return 0; fi
+            if printf '%s' "${out}" | grep -qE 'HTTP 403|not accessible'; then
+              echo "::warning::Can't write labels with this token (read-only, e.g. a fork PR on 'pull_request'; use 'pull_request_target'). ${out}"
+              exit 0
+            fi
+            echo "::error::GitHub API call failed: ${out}"
+            exit 1
+          }
+
+          # Count changed lines per file, leaving out the ignored globs.
+          set -f   # the globs are patterns, not files to expand
+          total=0; ignored=0
+          while IFS=$'\t' read -r file changes; do
+            skip=false
+            for pat in ${IGNORE//,/ }; do
+              # shellcheck disable=SC2053  # unquoted on purpose: ${pat} is a glob
+              if [[ "${file}" == ${pat} || "${file##*/}" == ${pat} ]]; then skip=true; break; fi
+            done
+            if ${skip}; then ignored=$((ignored + changes)); else total=$((total + changes)); fi
+          done < <(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+                     --jq '.[] | [.filename, (.additions + .deletions)] | @tsv')
+          set +f
+
+          if   [ "${total}" -lt "${t_s}" ];  then size=XS; color=3CBF00
+          elif [ "${total}" -lt "${t_m}" ];  then size=S;  color=5D9801
+          elif [ "${total}" -lt "${t_l}" ];  then size=M;  color=7F7203
+          elif [ "${total}" -lt "${t_xl}" ]; then size=L;  color=A14C05
+          else                                    size=XL; color=C32607
+          fi
+          label="size/${size}"
+          echo "Lines changed: ${total} (+${ignored} in ignored files) -> ${label}"
+
+          current=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" --jq '.[].name')
+          # Remove a previous size label if the size changed.
+          while IFS= read -r old; do
+            if [[ "${old}" == size/* && "${old}" != "${label}" ]]; then
+              api_write -X DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/$(jq -rn --arg s "${old}" '$s|@uri')" --silent
+            fi
+          done <<< "${current}"
+          if ! grep -qxF "${label}" <<< "${current}"; then
+            api_write "repos/${REPO}/labels" -f name="${label}" -f color="${color}" \
+              -f description="PR size: lines changed, without lockfiles or generated code" --silent
+            api_write "repos/${REPO}/issues/${PR_NUMBER}/labels" -f "labels[]=${label}" --silent
+          fi
+
+          {
+            echo "### PR size: \`${label}\`"
+            echo "${total} lines changed (${ignored} more in lockfiles or generated files, not counted)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${size}" = "XL" ]; then
+            echo "::notice::Large PR (${total} lines). Consider splitting it to make the review easier."
+          fi
+
+  labels:
+    name: Path labels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read         # read the labeler config through the API
+      pull-requests: write   # add labels
+      issues: write          # create labels that don't exist yet
+    steps:
+      - name: Check labeler config
+        id: config
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.event.pull_request.base.sha }}
+          CONFIG: ${{ inputs.labeler_config || env.LABELER_CONFIG }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${REF}" ]; then
+            echo "::warning::Not a pull request event; skipping path labels."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if out=$(gh api "repos/${REPO}/contents/${CONFIG}?ref=${REF}" --silent 2>&1); then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if printf '%s' "${out}" | grep -q 'HTTP 404'; then
+            echo "::notice::No ${CONFIG} on the base branch; path labels skipped. Add one to label PRs by changed paths."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::error::Couldn't read ${CONFIG}: ${out}"
+          exit 1
+
+      - name: Label PR by changed paths
+        if: steps.config.outputs.exists == 'true'
+        uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+        with:
+          configuration-path: ${{ inputs.labeler_config || env.LABELER_CONFIG }}

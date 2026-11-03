@@ -27,5 +27,10 @@ changes to inputs, secrets or behavior require a new major version.
   languages from the repo's files and runs one job per language; Kotlin uses autobuild, the
   rest build mode `none`. A `detect` job skips it with a warning where code scanning isn't
   available. Copy and call modes.
+- `pr-checks.yml`: checks that the PR title follows Conventional Commits, adds a `size/*`
+  label (lockfiles and generated code ignored) and path labels with `actions/labeler` v7.0.0
+  from the project's `.github/labeler.yml`. Runs on `pull_request_target` without checking out
+  the PR. Copy and call modes; sample `examples/labeler.yml` for the supported stacks.
+- `.github/labeler.yml` for this repo.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.
