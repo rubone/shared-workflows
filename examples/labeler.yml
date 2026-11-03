@@ -1,0 +1,58 @@
+# Labels by changed paths, used by the "Path labels" job of pr-checks.yml (actions/labeler v5+
+# format). Copy to .github/labeler.yml in the project repo and keep only the labels that fit.
+# Each key is a label name; it's created on first use. Globs: https://github.com/isaacs/minimatch
+# The file is read from the base branch, so changes to it apply after they're merged.
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: ['docs/**', '**/*.md']
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file: ['.github/**']
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/package.json'
+          - '**/package-lock.json'
+          - '**/yarn.lock'
+          - '**/pnpm-lock.yaml'
+          - '**/*.csproj'
+          - '**/Directory.Packages.props'
+          - '**/packages.lock.json'
+          - '**/pubspec.yaml'
+          - '**/pubspec.lock'
+          - '**/build.gradle'
+          - '**/build.gradle.kts'
+          - '**/libs.versions.toml'
+
+# .NET
+backend:
+  - changed-files:
+      - any-glob-to-any-file: ['**/*.cs', '**/*.csproj', '**/*.sln', '**/*.slnx', '**/appsettings*.json']
+
+# React / Angular / Node
+frontend:
+  - changed-files:
+      - any-glob-to-any-file: ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx', '**/*.html', '**/*.css', '**/*.scss']
+
+flutter:
+  - changed-files:
+      - any-glob-to-any-file: ['**/*.dart']
+
+android:
+  - changed-files:
+      - any-glob-to-any-file: ['**/*.kt', '**/AndroidManifest.xml', '**/src/main/res/**']
+
+docker:
+  - changed-files:
+      - any-glob-to-any-file: ['**/Dockerfile*', '**/*.dockerfile', '**/.dockerignore', '**/compose*.yaml', '**/compose*.yml', '**/docker-compose*.yml']
+
+infra:
+  - changed-files:
+      - any-glob-to-any-file: ['**/*.bicep', '**/*.bicepparam', '**/*.tf', 'infra/**']
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file: ['test/**', 'tests/**', '**/*Tests/**', '**/*.test.ts', '**/*.spec.ts', '**/*_test.dart', '**/src/test/**', '**/src/androidTest/**']

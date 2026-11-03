@@ -1,0 +1,12 @@
+# Path labels for this repo (pr-checks.yml). Projects: start from examples/labeler.yml.
+workflows:
+  - changed-files:
+      - any-glob-to-any-file: ['.github/workflows/**']
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: ['docs/**', '**/*.md']
+
+examples:
+  - changed-files:
+      - any-glob-to-any-file: ['examples/**']
