@@ -1,0 +1,187 @@
+# Stale: marks issues and pull requests with no activity as `stale` (with a comment), and
+# closes them after a while if nothing happens. Any comment, push or edit removes the label
+# and restarts the count. Uses actions/stale.
+#
+# Runs once a day and on demand. Start with DRY_RUN: 'true' in a repo with old issues: the
+# log lists what would be marked or closed, without changing anything.
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The schedule / workflow_dispatch triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      on: { schedule: [{ cron: '30 1 * * *' }], workflow_dispatch: {} }
+#      jobs:
+#        stale:
+#          permissions: { issues: write, pull-requests: write, actions: write }
+#          uses: rubone/shared-workflows/.github/workflows/stale.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/stale.md
+name: Stale
+
+on:
+  # A) Copy mode triggers.
+  schedule:
+    - cron: '30 1 * * *'   # daily, 01:30 UTC
+  workflow_dispatch:
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      days_before_issue_stale:
+        description: "Days without activity before an issue is marked stale. -1 = never. Overrides env.DAYS_BEFORE_ISSUE_STALE."
+        type: number
+        required: false
+        default: 0
+      days_before_issue_close:
+        description: "Days after being marked stale before an issue is closed. -1 = never. Overrides env.DAYS_BEFORE_ISSUE_CLOSE."
+        type: number
+        required: false
+        default: 0
+      days_before_pr_stale:
+        description: "Days without activity before a PR is marked stale. -1 = never. Overrides env.DAYS_BEFORE_PR_STALE."
+        type: number
+        required: false
+        default: 0
+      days_before_pr_close:
+        description: "Days after being marked stale before a PR is closed. -1 = never. Overrides env.DAYS_BEFORE_PR_CLOSE."
+        type: number
+        required: false
+        default: 0
+      exempt_labels:
+        description: "Comma-separated labels that keep an issue or PR from going stale. Overrides env.EXEMPT_LABELS."
+        type: string
+        required: false
+        default: ''
+      exempt_draft_pr:
+        description: "true = draft PRs never go stale. false falls back to env.EXEMPT_DRAFT_PR."
+        type: boolean
+        required: false
+        default: false
+      dry_run:
+        description: "true = only log what would happen, change nothing. false falls back to env.DRY_RUN."
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Days without activity before marking as stale, and days after that before closing.
+  # -1 = never (e.g. DAYS_BEFORE_ISSUE_CLOSE: '-1' marks issues but never closes them).
+  DAYS_BEFORE_ISSUE_STALE: '60'
+  DAYS_BEFORE_ISSUE_CLOSE: '14'
+  DAYS_BEFORE_PR_STALE: '30'
+  DAYS_BEFORE_PR_CLOSE: '14'
+  # Labels that exempt an issue or PR. Add one of them to keep something open.
+  EXEMPT_LABELS: 'pinned,security,keep-open'
+  # 'true' = draft PRs never go stale.
+  EXEMPT_DRAFT_PR: 'false'
+  # 'true' = dry run: log what would be marked or closed, change nothing.
+  DRY_RUN: 'false'
+  # Label added to stale issues and PRs.
+  STALE_LABEL: 'stale'
+  # Max API operations per run (protects the rate limit). Leftovers are handled the next day.
+  OPERATIONS_PER_RUN: '100'
+
+jobs:
+  stale:
+    name: Mark and close stale issues and PRs
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write          # label, comment and close issues
+      pull-requests: write   # label, comment and close PRs
+      actions: write         # actions/stale keeps its progress in the Actions cache
+    steps:
+      - name: Prepare settings
+        id: cfg
+        env:
+          DAYS_BEFORE_ISSUE_STALE: ${{ inputs.days_before_issue_stale || env.DAYS_BEFORE_ISSUE_STALE }}
+          DAYS_BEFORE_ISSUE_CLOSE: ${{ inputs.days_before_issue_close || env.DAYS_BEFORE_ISSUE_CLOSE }}
+          DAYS_BEFORE_PR_STALE: ${{ inputs.days_before_pr_stale || env.DAYS_BEFORE_PR_STALE }}
+          DAYS_BEFORE_PR_CLOSE: ${{ inputs.days_before_pr_close || env.DAYS_BEFORE_PR_CLOSE }}
+          EXEMPT_LABELS: ${{ inputs.exempt_labels || env.EXEMPT_LABELS }}
+          EXEMPT_DRAFT_PR: ${{ inputs.exempt_draft_pr || env.EXEMPT_DRAFT_PR }}
+          DRY_RUN: ${{ inputs.dry_run || env.DRY_RUN }}
+        run: |
+          set -euo pipefail
+
+          for v in DAYS_BEFORE_ISSUE_STALE DAYS_BEFORE_ISSUE_CLOSE DAYS_BEFORE_PR_STALE DAYS_BEFORE_PR_CLOSE; do
+            if ! [[ "${!v}" =~ ^(-1|[1-9][0-9]*)$ ]]; then
+              echo "::error::${v} must be a positive number of days or -1 (never). Got: '${!v}'."
+              exit 1
+            fi
+          done
+          for v in EXEMPT_DRAFT_PR DRY_RUN; do
+            if [ "${!v}" != "true" ] && [ "${!v}" != "false" ]; then
+              echo "::error::${v} must be 'true' or 'false'. Got: '${!v}'."
+              exit 1
+            fi
+          done
+
+          # Comment posted when marking as stale; it only mentions closing when it will happen.
+          # $1 = issue|pull request, $2 = days before stale, $3 = days before close.
+          stale_msg() {
+            local m="This $1 has had no activity for $2 days, so it's been marked as stale."
+            if [ "$3" = "-1" ]; then
+              m+=" Comment or update it if it's still relevant."
+            else
+              m+=" It will be closed in $3 days unless there's new activity. Comment or update it to keep it open."
+            fi
+            m+=" (Labels that exempt it: ${EXEMPT_LABELS}.)"
+            printf '%s' "${m}"
+          }
+
+          {
+            echo "issue_stale=${DAYS_BEFORE_ISSUE_STALE}"
+            echo "issue_close=${DAYS_BEFORE_ISSUE_CLOSE}"
+            echo "pr_stale=${DAYS_BEFORE_PR_STALE}"
+            echo "pr_close=${DAYS_BEFORE_PR_CLOSE}"
+            echo "exempt=${EXEMPT_LABELS}"
+            echo "draft=${EXEMPT_DRAFT_PR}"
+            echo "dry=${DRY_RUN}"
+            echo "issue_msg=$(stale_msg issue "${DAYS_BEFORE_ISSUE_STALE}" "${DAYS_BEFORE_ISSUE_CLOSE}")"
+            echo "pr_msg=$(stale_msg 'pull request' "${DAYS_BEFORE_PR_STALE}" "${DAYS_BEFORE_PR_CLOSE}")"
+            echo "issue_close_msg=Closed because it had no activity for ${DAYS_BEFORE_ISSUE_CLOSE} days after being marked as stale. Reopen it if it's still relevant."
+            echo "pr_close_msg=Closed because it had no activity for ${DAYS_BEFORE_PR_CLOSE} days after being marked as stale. Reopen it if it's still relevant; the branch wasn't deleted."
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Stale settings"
+            echo
+            echo "| | Mark stale after | Close after stale |"
+            echo "|---|---|---|"
+            echo "| Issues | ${DAYS_BEFORE_ISSUE_STALE} days | ${DAYS_BEFORE_ISSUE_CLOSE} days |"
+            echo "| Pull requests | ${DAYS_BEFORE_PR_STALE} days | ${DAYS_BEFORE_PR_CLOSE} days |"
+            echo
+            echo "Exempt labels: \`${EXEMPT_LABELS}\`. Drafts exempt: ${EXEMPT_DRAFT_PR}. Dry run: ${DRY_RUN}."
+            echo "(-1 = never)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "::notice::Dry run: nothing will be labeled, commented or closed. See the log of the next step."
+          fi
+
+      - name: Mark and close stale issues and PRs
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          days-before-issue-stale: ${{ steps.cfg.outputs.issue_stale }}
+          days-before-issue-close: ${{ steps.cfg.outputs.issue_close }}
+          days-before-pr-stale: ${{ steps.cfg.outputs.pr_stale }}
+          days-before-pr-close: ${{ steps.cfg.outputs.pr_close }}
+          stale-issue-label: ${{ env.STALE_LABEL }}
+          stale-pr-label: ${{ env.STALE_LABEL }}
+          stale-issue-message: ${{ steps.cfg.outputs.issue_msg }}
+          stale-pr-message: ${{ steps.cfg.outputs.pr_msg }}
+          close-issue-message: ${{ steps.cfg.outputs.issue_close_msg }}
+          close-pr-message: ${{ steps.cfg.outputs.pr_close_msg }}
+          close-issue-reason: not_planned
+          exempt-issue-labels: ${{ steps.cfg.outputs.exempt }}
+          exempt-pr-labels: ${{ steps.cfg.outputs.exempt }}
+          exempt-draft-pr: ${{ steps.cfg.outputs.draft }}
+          remove-stale-when-updated: true
+          operations-per-run: ${{ env.OPERATIONS_PER_RUN }}
+          debug-only: ${{ steps.cfg.outputs.dry }}

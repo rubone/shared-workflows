@@ -32,5 +32,8 @@ changes to inputs, secrets or behavior require a new major version.
   from the project's `.github/labeler.yml`. Runs on `pull_request_target` without checking out
   the PR. Copy and call modes; sample `examples/labeler.yml` for the supported stacks.
 - `.github/labeler.yml` for this repo.
+- `stale.yml`: daily job that marks issues (60 days) and PRs (30 days) with no activity as
+  `stale` and closes them 14 days later, using `actions/stale` v11.0.0 pinned by SHA. Exempt
+  labels, `-1` to never mark or close, and a dry-run mode. Copy and call modes.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.

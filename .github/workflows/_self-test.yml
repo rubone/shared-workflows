@@ -80,3 +80,16 @@ jobs:
       pull-requests: write
       issues: write
     uses: ./.github/workflows/pr-checks.yml
+
+  # Smoke test of call mode as a dry run: logs what it would mark or close in this repo,
+  # without changing anything.
+  stale:
+    name: Stale (smoke test)
+    if: github.event_name == 'pull_request'
+    permissions:
+      issues: write
+      pull-requests: write
+      actions: write
+    uses: ./.github/workflows/stale.yml
+    with:
+      dry_run: true
