@@ -172,6 +172,8 @@ jobs:
           IFS=, read -r t_s t_m t_l t_xl <<< "${THRESHOLDS}"
 
           # Writes that fail with 403 mean a read-only token (e.g. a fork PR on `pull_request`).
+          # Output is captured (not printed): on errors it holds the JSON body, which has the
+          # error code. Don't pass --silent: it drops that body.
           api_write() {
             local out
             if out=$(gh api "$@" 2>&1); then return 0; fi
@@ -211,13 +213,13 @@ jobs:
           # Remove a previous size label if the size changed.
           while IFS= read -r old; do
             if [[ "${old}" == size/* && "${old}" != "${label}" ]]; then
-              api_write -X DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/$(jq -rn --arg s "${old}" '$s|@uri')" --silent
+              api_write -X DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/$(jq -rn --arg s "${old}" '$s|@uri')"
             fi
           done <<< "${current}"
           if ! grep -qxF "${label}" <<< "${current}"; then
             api_write "repos/${REPO}/labels" -f name="${label}" -f color="${color}" \
-              -f description="PR size: lines changed, without lockfiles or generated code" --silent
-            api_write "repos/${REPO}/issues/${PR_NUMBER}/labels" -f "labels[]=${label}" --silent
+              -f description="PR size: lines changed, without lockfiles or generated code"
+            api_write "repos/${REPO}/issues/${PR_NUMBER}/labels" -f "labels[]=${label}"
           fi
 
           {
