@@ -114,3 +114,22 @@ jobs:
     uses: ./.github/workflows/node-ci.yml
     with:
       working_directory: ${{ matrix.project }}
+
+  # Smoke test of call mode on tests/fixtures/dotnet (.slnx, global.json, .editorconfig,
+  # xUnit), with warnings as errors; plus the repo root, which has no solution and must
+  # skip with a warning.
+  dotnet-ci:
+    name: .NET CI (smoke test, ${{ matrix.project }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - tests/fixtures/dotnet
+          - .
+    permissions:
+      contents: read
+    uses: ./.github/workflows/dotnet-ci.yml
+    with:
+      working_directory: ${{ matrix.project }}
+      warnings_as_errors: true

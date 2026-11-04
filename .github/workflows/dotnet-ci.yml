@@ -1,0 +1,355 @@
+# .NET CI: restores with cache, checks formatting, builds and runs the tests of a .NET
+# solution (ASP.NET Core APIs, workers, class libraries...) with xUnit, NUnit or MSTest.
+#
+# Detected from the project, nothing to set in most repos:
+#   - Solution: the .slnx or .sln in WORKING_DIRECTORY (or its only .csproj).
+#   - SDK version: global.json if there is one, else DOTNET_VERSION.
+#   - Format check: runs when there's an .editorconfig (FORMAT_CHECK: 'auto').
+#   - Tests: skipped with a notice when no project references a test framework.
+#   - Restore in locked mode when the repo has packages.lock.json files.
+# Without a solution or project in WORKING_DIRECTORY, it skips with a warning (run stays
+# green).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The pull_request / push triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        dotnet-ci:
+#          permissions: { contents: read }
+#          uses: rubone/shared-workflows/.github/workflows/dotnet-ci.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/dotnet-ci.md
+name: .NET CI
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder with the solution, relative to the repo root. Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      solution:
+        description: "Solution or project file, relative to working_directory. Empty = detect. Overrides env.SOLUTION."
+        type: string
+        required: false
+        default: ''
+      dotnet_version:
+        description: "SDK version when there's no global.json (e.g. '10.0.x'). Overrides env.DOTNET_VERSION."
+        type: string
+        required: false
+        default: ''
+      configuration:
+        description: "Build configuration. Overrides env.CONFIGURATION."
+        type: string
+        required: false
+        default: ''
+      format_check:
+        description: "auto (when there's an .editorconfig), true or false. Overrides env.FORMAT_CHECK."
+        type: string
+        required: false
+        default: ''
+      warnings_as_errors:
+        description: "true = build warnings fail the build. false falls back to env.WARNINGS_AS_ERRORS."
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder with the solution, relative to the repo root ('.' = root).
+  WORKING_DIRECTORY: '.'
+  # Solution or project file, relative to WORKING_DIRECTORY. Empty = the only .slnx/.sln
+  # there, else the only .csproj. Set it when the folder has more than one.
+  SOLUTION: ''
+  # SDK version, used when there's no global.json (global.json always wins).
+  DOTNET_VERSION: '10.0.x'
+  # Build configuration for build and test.
+  CONFIGURATION: 'Release'
+  # dotnet format --verify-no-changes: 'auto' = only when the repo has an .editorconfig.
+  FORMAT_CHECK: 'auto'
+  # 'true' = build warnings (nullable, analyzers, obsolete APIs...) fail the build.
+  WARNINGS_AS_ERRORS: 'false'
+
+jobs:
+  ci:
+    name: .NET build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # A new push to the same PR cancels the previous run.
+    concurrency:
+      group: dotnet-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.working_directory }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    env:
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect project
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          SOLUTION: ${{ inputs.solution || env.SOLUTION }}
+          DOTNET_VERSION: ${{ inputs.dotnet_version || env.DOTNET_VERSION }}
+          CONFIGURATION: ${{ inputs.configuration || env.CONFIGURATION }}
+          FORMAT_CHECK: ${{ inputs.format_check || env.FORMAT_CHECK }}
+          WARNINGS_AS_ERRORS: ${{ inputs.warnings_as_errors || env.WARNINGS_AS_ERRORS }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"
+          dir="${dir#./}"
+          dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a folder inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          case "${FORMAT_CHECK}" in auto|true|false) ;; *)
+            echo "::error::FORMAT_CHECK must be 'auto', 'true' or 'false'. Got: '${FORMAT_CHECK}'."; exit 1 ;;
+          esac
+          case "${WARNINGS_AS_ERRORS}" in true|false) ;; *)
+            echo "::error::WARNINGS_AS_ERRORS must be 'true' or 'false'. Got: '${WARNINGS_AS_ERRORS}'."; exit 1 ;;
+          esac
+          if [ -z "${CONFIGURATION}" ]; then
+            echo "::error::CONFIGURATION can't be empty (e.g. 'Release')."; exit 1
+          fi
+
+          # Files directly in the folder matching the patterns, one per line.
+          files_in() { local d=$1; shift; (cd "${d}" 2>/dev/null && for p in "$@"; do compgen -G "${p}" || true; done); }
+
+          if [ ! -d "${dir}" ]; then
+            echo "::warning::Folder '${dir}' doesn't exist; skipping .NET CI. Check WORKING_DIRECTORY."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "${SOLUTION}" ]; then
+            target="${SOLUTION}"
+            if [ ! -f "${dir}/${target}" ]; then
+              echo "::error::SOLUTION '${target}' not found in '${dir}'."
+              exit 1
+            fi
+          else
+            mapfile -t slns < <(files_in "${dir}" '*.slnx' '*.sln')
+            mapfile -t projs < <(files_in "${dir}" '*.csproj' '*.fsproj' '*.vbproj')
+            if [ "${#slns[@]}" -gt 1 ]; then
+              echo "::error::More than one solution in '${dir}' (${slns[*]}). Set SOLUTION to the one to build."
+              exit 1
+            elif [ "${#slns[@]}" -eq 1 ]; then
+              target="${slns[0]}"
+            elif [ "${#projs[@]}" -gt 1 ]; then
+              echo "::error::No solution and more than one project in '${dir}' (${projs[*]}). Set SOLUTION, or add a solution."
+              exit 1
+            elif [ "${#projs[@]}" -eq 1 ]; then
+              target="${projs[0]}"
+            else
+              echo "::warning::No .slnx, .sln or project file in '${dir}'; skipping .NET CI. If the solution is in a subfolder, set WORKING_DIRECTORY."
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # global.json: in the folder or the repo root. dotnet obeys it, so it sets the SDK.
+          global_json=""
+          for f in "${dir}/global.json" "global.json"; do
+            if [ -f "${f}" ]; then global_json="${f}"; break; fi
+          done
+          if [ -z "${global_json}" ] && [ -z "${DOTNET_VERSION}" ]; then
+            echo "::error::No global.json and DOTNET_VERSION is empty: set one of them (e.g. '10.0.x')."
+            exit 1
+          fi
+          # Microsoft.Testing.Platform mode (opt-in in global.json) takes different arguments.
+          runner=vstest
+          if [ -n "${global_json}" ] && grep -q 'Microsoft.Testing.Platform' "${global_json}"; then
+            runner=mtp
+          fi
+
+          # Format check: auto = when there's an .editorconfig in the folder or a parent.
+          format=false
+          if [ "${FORMAT_CHECK}" = "true" ]; then
+            format=true
+          elif [ "${FORMAT_CHECK}" = "auto" ]; then
+            d="${dir}"
+            while :; do
+              if [ -f "${d}/.editorconfig" ]; then format=true; break; fi
+              [ "${d}" = "." ] && break
+              d=$(dirname "${d}")
+            done
+            [ "${format}" = "true" ] || echo "::notice::Format check skipped: no .editorconfig. Add one (dotnet new editorconfig) to check formatting, or set FORMAT_CHECK: 'true'."
+          fi
+
+          # Lock files and test projects under the folder (build output and .git left out).
+          find_files() {
+            find "${dir}" \( -name bin -o -name obj -o -name .git -o -name node_modules \) -prune \
+              -o -type f \( "$@" \) -print
+          }
+          locked=false
+          if [ -n "$(find_files -name packages.lock.json)" ]; then
+            locked=true
+          fi
+          tests=0
+          while IFS= read -r p; do
+            if grep -qE 'Microsoft\.NET\.Test\.Sdk|<IsTestProject>[[:space:]]*true|Include="(xunit|xunit\.v3|NUnit|MSTest)"' "${p}"; then
+              tests=$((tests + 1))
+            fi
+          done < <(find_files -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj')
+          [ "${tests}" -gt 0 ] || echo "::notice::Test skipped: no test project (none references xUnit, NUnit, MSTest or Microsoft.NET.Test.Sdk) under '${dir}'."
+
+          {
+            echo "found=true"
+            echo "dir=${dir}"
+            echo "target=${target}"
+            echo "global_json=${global_json}"
+            echo "dotnet_version=$([ -n "${global_json}" ] || printf '%s' "${DOTNET_VERSION}")"
+            echo "runner=${runner}"
+            echo "format=${format}"
+            echo "locked=${locked}"
+            echo "tests=${tests}"
+            echo "configuration=${CONFIGURATION}"
+            echo "warnaserror=${WARNINGS_AS_ERRORS}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Project: ${dir}/${target} | SDK: ${global_json:-${DOTNET_VERSION}} | ${CONFIGURATION}"
+          echo "Format check: ${format} | Locked restore: ${locked} | Test projects: ${tests} (${runner})"
+
+      - name: Set up .NET
+        id: dotnet
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: ${{ steps.detect.outputs.dotnet_version }}
+          global-json-file: ${{ steps.detect.outputs.global_json }}
+
+      - name: Cache NuGet packages
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.fsproj', '**/*.props', '**/*.targets', '**/packages.lock.json', '**/global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TARGET: ${{ steps.detect.outputs.target }}
+          LOCKED: ${{ steps.detect.outputs.locked }}
+        run: |
+          args=()
+          # packages.lock.json present: fail if it doesn't match the project files.
+          [ "${LOCKED}" = "true" ] && args+=(--locked-mode)
+          dotnet restore "${TARGET}" ${args[@]+"${args[@]}"}
+
+      - name: Check formatting
+        id: format
+        if: steps.detect.outputs.format == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TARGET: ${{ steps.detect.outputs.target }}
+        run: |
+          if ! dotnet format "${TARGET}" --verify-no-changes --no-restore; then
+            echo "::error::Formatting doesn't match .editorconfig. Run 'dotnet format' locally and commit the changes."
+            exit 1
+          fi
+
+      - name: Build
+        id: build
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TARGET: ${{ steps.detect.outputs.target }}
+          CONFIGURATION: ${{ steps.detect.outputs.configuration }}
+          WARNAS: ${{ steps.detect.outputs.warnaserror }}
+        run: |
+          args=()
+          [ "${WARNAS}" = "true" ] && args+=(-warnaserror)
+          dotnet build "${TARGET}" --no-restore --configuration "${CONFIGURATION}" ${args[@]+"${args[@]}"}
+
+      - name: Test
+        id: test
+        if: steps.detect.outputs.tests != '0' && steps.detect.outputs.tests != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TARGET: ${{ steps.detect.outputs.target }}
+          CONFIGURATION: ${{ steps.detect.outputs.configuration }}
+          RUNNER: ${{ steps.detect.outputs.runner }}
+        run: |
+          if [ "${RUNNER}" = "mtp" ]; then
+            # Microsoft.Testing.Platform: the target goes in --solution / --project.
+            case "${TARGET}" in
+              *.sln|*.slnx) kind=--solution ;;
+              *) kind=--project ;;
+            esac
+            dotnet test "${kind}" "${TARGET}" --no-build --configuration "${CONFIGURATION}"
+          else
+            dotnet test "${TARGET}" --no-build --configuration "${CONFIGURATION}" \
+              --logger trx --results-directory "${RUNNER_TEMP}/test-results"
+          fi
+
+      - name: Summary
+        if: always() && steps.detect.outputs.found == 'true'
+        env:
+          DIR: ${{ steps.detect.outputs.dir }}
+          TARGET: ${{ steps.detect.outputs.target }}
+          SDK: ${{ steps.dotnet.outputs.dotnet-version }}
+          CONFIGURATION: ${{ steps.detect.outputs.configuration }}
+          FORMAT: ${{ steps.detect.outputs.format }}|${{ steps.format.outcome }}
+          BUILD: true|${{ steps.build.outcome }}
+          TEST: ${{ steps.detect.outputs.tests != '0' }}|${{ steps.test.outcome }}
+        run: |
+          row() {
+            local enabled="${2%%|*}" outcome="${2#*|}" icon
+            case "${outcome}" in
+              success) icon="✅" ;;
+              failure) icon="❌" ;;
+              skipped) icon="—"; outcome="skipped (an earlier step failed)" ;;
+              *) icon="—" ;;
+            esac
+            if [ "${enabled}" != "true" ]; then
+              echo "| $1 | — not run ($3) |"
+            else
+              echo "| $1 | ${icon} ${outcome:-not reached} |"
+            fi
+          }
+          {
+            echo "### .NET CI: \`${DIR}/${TARGET}\`"
+            echo
+            echo "SDK ${SDK:-?} · ${CONFIGURATION}"
+            echo
+            echo "| Step | Result |"
+            echo "|---|---|"
+            row "Format" "${FORMAT}" "no .editorconfig or FORMAT_CHECK off"
+            row "Build" "${BUILD}" ""
+            row "Test" "${TEST}" "no test projects"
+            # Totals from the VSTest .trx files (not produced in Microsoft.Testing.Platform mode).
+            shopt -s nullglob
+            trx=("${RUNNER_TEMP}"/test-results/*.trx)
+            if [ "${#trx[@]}" -gt 0 ]; then
+              read -r total passed failed < <(grep -ho '<Counters [^>]*>' "${trx[@]}" | awk '
+                { for (i = 1; i <= NF; i++) { split($i, kv, "=\""); v = kv[2] + 0
+                    if (kv[1] == "total") t += v; if (kv[1] == "passed") p += v; if (kv[1] == "failed") f += v } }
+                END { print t + 0, p + 0, f + 0 }')
+              echo
+              echo "Tests: ${total} total, ${passed} passed, ${failed} failed."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

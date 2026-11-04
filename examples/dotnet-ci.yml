@@ -1,0 +1,26 @@
+# Call mode: copy to .github/workflows/dotnet-ci.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy .github/workflows/dotnet-ci.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/dotnet-ci.md
+name: .NET CI
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  dotnet-ci:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      contents: read
+    uses: rubone/shared-workflows/.github/workflows/dotnet-ci.yml@v1
+    with:
+      working_directory: '.'     # folder with the .slnx / .sln
+      dotnet_version: '10.0.x'   # used only when there's no global.json
+      format_check: 'auto'       # auto (with .editorconfig) | true | false
+      warnings_as_errors: false

@@ -93,7 +93,7 @@ env:
 
 jobs:
   ci:
-    name: Build and test
+    name: Node build and test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
