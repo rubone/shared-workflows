@@ -35,5 +35,12 @@ changes to inputs, secrets or behavior require a new major version.
 - `stale.yml`: daily job that marks issues (60 days) and PRs (30 days) with no activity as
   `stale` and closes them 14 days later, using `actions/stale` v11.0.0 pinned by SHA. Exempt
   labels, `-1` to never mark or close, and a dry-run mode. Copy and call modes.
+- `node-ci.yml`: installs dependencies with cache and runs the project's lint, type check,
+  test and build scripts (each only if `package.json` defines it). Detects npm, pnpm, Yarn 1
+  or Yarn 2+ from the lockfile, and the Node version from `.nvmrc`, `.node-version` or
+  `package.json`. Skips with a warning when there's no `package.json`. Uses
+  `actions/setup-node` v7.1.0 and `pnpm/action-setup` v6.1.0 pinned by SHA. Copy and call
+  modes.
+- `tests/fixtures/`: sample projects (npm, pnpm, Yarn 1, Yarn 4) for the self-test.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.

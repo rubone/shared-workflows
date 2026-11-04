@@ -10,3 +10,7 @@ documentation:
 examples:
   - changed-files:
       - any-glob-to-any-file: ['examples/**']
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file: ['tests/**']
