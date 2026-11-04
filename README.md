@@ -22,6 +22,7 @@ shared-workflows/
 ├── actions/              # composite actions
 ├── examples/             # sample caller workflows
 ├── docs/                 # inputs, secrets, and outputs for each workflow
+├── tests/fixtures/       # sample projects used by _self-test.yml
 ├── CHANGELOG.md
 └── README.md
 ```
@@ -32,6 +33,7 @@ shared-workflows/
 | `actions/` | Composite actions: reusable groups of steps for use inside any job (setup, login, caching). |
 | `examples/` | Sample caller workflows for call mode. |
 | `docs/` | Documentation for each workflow and action: inputs, secrets, and outputs. |
+| `tests/fixtures/` | Minimal sample projects (no dependencies) that `_self-test.yml` runs the stack workflows against. Not meant to be copied. |
 
 ## Available workflows
 
@@ -43,6 +45,7 @@ shared-workflows/
 | [`codeql.yml`](.github/workflows/codeql.yml) | CodeQL static analysis for security bugs. Detects the languages (C#, JS/TS, Java/Kotlin, Python, Actions) and analyzes each in parallel. Skips with a warning where code scanning isn't available. | [docs](docs/codeql.md) | [caller](examples/codeql.yml) |
 | [`pr-checks.yml`](.github/workflows/pr-checks.yml) | Checks that the PR title follows Conventional Commits, and labels the PR by size (`size/XS`…`size/XL`) and by changed paths. | [docs](docs/pr-checks.md) | [caller](examples/pr-checks.yml), [labeler](examples/labeler.yml) |
 | [`stale.yml`](.github/workflows/stale.yml) | Daily: marks issues and PRs with no activity as `stale` and closes them later if nothing happens. Dry-run mode to try it safely. | [docs](docs/stale.md) | [caller](examples/stale.yml) |
+| [`node-ci.yml`](.github/workflows/node-ci.yml) | Installs with cache and runs the project's lint, type check, test and build scripts. Detects npm, pnpm or Yarn and the Node version. React, Angular, Vue, Next.js, Node backends. | [docs](docs/node-ci.md) | [caller](examples/node-ci.yml) |
 
 ### Repo settings each workflow needs
 
@@ -57,6 +60,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `codeql.yml` | **Code scanning** available, with CodeQL **default setup off** | Free, nothing to enable | Needs GitHub Code Security / Advanced Security |
 | `pr-checks.yml` | Optional `.github/labeler.yml` for path labels. Recommended: squash merge only, with the PR title as commit message | — | — |
 | `stale.yml` | Nothing | — | — |
+| `node-ci.yml` | A committed lockfile | — | — |
 
 Recommended, though no workflow depends on them:
 

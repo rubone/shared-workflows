@@ -1,0 +1,358 @@
+# Node CI: installs dependencies with cache and runs the project's lint, type check, test
+# and build scripts. For React, Angular, Vue, Next.js and Node backends (Express, NestJS...).
+#
+# Detected from the project, nothing to set in most repos:
+#   - Package manager, from the lockfile: npm, pnpm, Yarn 1 or Yarn 2+.
+#   - Node version: NODE_VERSION, else .nvmrc / .node-version, else package.json
+#     (volta, devEngines, engines), else the latest LTS.
+#   - Steps: each runs only if package.json has the script (e.g. no `typecheck` script,
+#     no type check step).
+# Without a package.json in WORKING_DIRECTORY, it skips with a warning (run stays green).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The pull_request / push triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        node-ci:
+#          permissions: { contents: read }
+#          uses: rubone/shared-workflows/.github/workflows/node-ci.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/node-ci.md
+name: Node CI
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder with the project's package.json, relative to the repo root. Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      node_version:
+        description: "Node version (e.g. '22', '24.x', 'lts/*'). Empty = from .nvmrc, .node-version or package.json. Overrides env.NODE_VERSION."
+        type: string
+        required: false
+        default: ''
+      pnpm_version:
+        description: "pnpm version when package.json has no packageManager field. Overrides env.PNPM_VERSION."
+        type: string
+        required: false
+        default: ''
+      lint_script:
+        description: "Lint script names to try, in order; 'off' = skip. Overrides env.LINT_SCRIPT."
+        type: string
+        required: false
+        default: ''
+      typecheck_script:
+        description: "Type check script names to try, in order; 'off' = skip. Overrides env.TYPECHECK_SCRIPT."
+        type: string
+        required: false
+        default: ''
+      test_script:
+        description: "Test script names to try, in order; 'off' = skip. Overrides env.TEST_SCRIPT."
+        type: string
+        required: false
+        default: ''
+      build_script:
+        description: "Build script names to try, in order; 'off' = skip. Overrides env.BUILD_SCRIPT."
+        type: string
+        required: false
+        default: ''
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder with package.json, relative to the repo root ('.' = root). For a monorepo with
+  # several apps, copy the workflow once per app, or call it once per app.
+  WORKING_DIRECTORY: '.'
+  # Node version. Empty = from .nvmrc / .node-version / package.json, else the latest LTS.
+  NODE_VERSION: ''
+  # pnpm only, used when package.json has no "packageManager": "pnpm@x.y.z" field.
+  PNPM_VERSION: '10'
+  # package.json scripts to run, as comma-separated names: the first one that exists runs.
+  # 'off' = never run that step. A missing script is skipped with a notice.
+  LINT_SCRIPT: 'lint'
+  TYPECHECK_SCRIPT: 'typecheck,type-check'
+  TEST_SCRIPT: 'test:ci,test'   # test:ci first: Angular with Karma needs a non-watch script
+  BUILD_SCRIPT: 'build'
+
+jobs:
+  ci:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # A new push to the same PR cancels the previous run.
+    concurrency:
+      group: node-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.working_directory }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect project
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          NODE_VERSION: ${{ inputs.node_version || env.NODE_VERSION }}
+          PNPM_VERSION: ${{ inputs.pnpm_version || env.PNPM_VERSION }}
+          LINT_SCRIPT: ${{ inputs.lint_script || env.LINT_SCRIPT }}
+          TYPECHECK_SCRIPT: ${{ inputs.typecheck_script || env.TYPECHECK_SCRIPT }}
+          TEST_SCRIPT: ${{ inputs.test_script || env.TEST_SCRIPT }}
+          BUILD_SCRIPT: ${{ inputs.build_script || env.BUILD_SCRIPT }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"
+          dir="${dir#./}"
+          dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a folder inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          pkg="${dir}/package.json"
+          if [ ! -f "${pkg}" ]; then
+            echo "::warning::No package.json in '${dir}'; skipping Node CI. If the project is in a subfolder, set WORKING_DIRECTORY."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! jq empty "${pkg}" 2>/dev/null; then
+            echo "::error::${pkg} isn't valid JSON."
+            exit 1
+          fi
+
+          # Lockfile: in the project folder or, for workspaces, in a parent folder.
+          lockfile=""
+          d="${dir}"
+          while :; do
+            for f in package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock; do
+              if [ -f "${d}/${f}" ]; then lockfile="${d}/${f}"; break 2; fi
+            done
+            [ "${d}" = "." ] && break
+            d=$(dirname "${d}")
+          done
+          if [ -z "${lockfile}" ]; then
+            echo "::error::No lockfile (package-lock.json, pnpm-lock.yaml or yarn.lock) in '${dir}' or its parent folders. Commit it, so CI installs the same versions as your machine."
+            exit 1
+          fi
+          root=$(dirname "${lockfile}")
+          root_pkg="${root}/package.json"
+          [ -f "${root_pkg}" ] || root_pkg="${pkg}"
+          pm_field=$(jq -r '.packageManager // ""' "${root_pkg}")
+
+          pnpm_ver=""
+          case "${lockfile##*/}" in
+            package-lock.json|npm-shrinkwrap.json)
+              pm=npm; run=npm; install="npm ci" ;;
+            pnpm-lock.yaml)
+              pm=pnpm; run=pnpm; install="pnpm install --frozen-lockfile"
+              # pnpm/action-setup reads packageManager itself, and fails if both are set.
+              if [[ "${pm_field}" != pnpm@* ]]; then pnpm_ver="${PNPM_VERSION}"; fi ;;
+            yarn.lock)
+              run=yarn
+              if grep -q '^__metadata:' "${lockfile}"; then
+                pm=yarn-berry; install="yarn install --immutable"
+                if [[ "${pm_field}" != yarn@* ]] && ! grep -qs '^yarnPath:' "${root}/.yarnrc.yml"; then
+                  echo "::error::yarn.lock is from Yarn 2+, but ${root_pkg} has no \"packageManager\": \"yarn@x.y.z\" field. Add it (run 'yarn set version stable') so CI uses the same Yarn."
+                  exit 1
+                fi
+              else
+                pm=yarn; install="yarn install --frozen-lockfile"
+              fi ;;
+          esac
+
+          # Node version: explicit value, else a version file, else latest LTS.
+          node_version=""; node_file=""
+          if [ -n "${NODE_VERSION}" ]; then
+            node_version="${NODE_VERSION}"
+          else
+            for f in "${dir}/.nvmrc" "${dir}/.node-version" "${root}/.nvmrc" "${root}/.node-version"; do
+              if [ -f "${f}" ]; then node_file="${f}"; break; fi
+            done
+            if [ -z "${node_file}" ] && jq -e '.volta.node // .devEngines.runtime // .engines.node // empty' "${pkg}" >/dev/null; then
+              node_file="${pkg}"
+            fi
+            if [ -z "${node_file}" ]; then
+              node_version="lts/*"
+              echo "::notice::No Node version set (NODE_VERSION, .nvmrc, .node-version or package.json engines); using the latest LTS. Pin it to avoid surprises when a new LTS comes out."
+            fi
+          fi
+
+          # First script of the comma-separated list that package.json defines; '' if none.
+          pick() {
+            local s
+            [ "$1" = "off" ] && return 0
+            for s in ${1//,/ }; do
+              if jq -e --arg s "${s}" '.scripts[$s] // empty' "${pkg}" >/dev/null; then
+                printf '%s' "${s}"
+                return 0
+              fi
+            done
+          }
+          lint=$(pick "${LINT_SCRIPT}")
+          typecheck=$(pick "${TYPECHECK_SCRIPT}")
+          test=$(pick "${TEST_SCRIPT}")
+          build=$(pick "${BUILD_SCRIPT}")
+          # `npm init` leaves a test script that only fails: treat it as no tests.
+          if [ -n "${test}" ] && jq -r --arg s "${test}" '.scripts[$s]' "${pkg}" | grep -q 'no test specified'; then
+            echo "::notice::Test skipped: the '${test}' script is npm init's placeholder (\"no test specified\")."
+            test=""
+            TEST_SCRIPT=off   # already explained; no second notice below
+          fi
+          for step in "Lint:lint:${LINT_SCRIPT}" "Type check:typecheck:${TYPECHECK_SCRIPT}" "Test:test:${TEST_SCRIPT}" "Build:build:${BUILD_SCRIPT}"; do
+            IFS=: read -r label var names <<< "${step}"
+            if [ -z "${!var}" ] && [ "${names}" != "off" ]; then
+              echo "::notice::${label} skipped: no script named ${names//,/ or } in ${pkg}."
+            fi
+          done
+
+          {
+            echo "found=true"
+            echo "dir=${dir}"
+            echo "root=${root}"
+            echo "lockfile=${lockfile}"
+            echo "pm=${pm}"
+            echo "run=${run}"
+            echo "install=${install}"
+            echo "pnpm_version=${pnpm_ver}"
+            echo "root_pkg=${root_pkg}"
+            echo "node_version=${node_version}"
+            echo "node_file=${node_file}"
+            echo "lint=${lint}"
+            echo "typecheck=${typecheck}"
+            echo "test=${test}"
+            echo "build=${build}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Project: ${dir} | ${pm} (${lockfile}) | Node: ${node_version:-from ${node_file}}"
+          echo "Scripts: lint='${lint}' typecheck='${typecheck}' test='${test}' build='${build}'"
+
+      - name: Set up Node
+        id: node
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.detect.outputs.node_version }}
+          node-version-file: ${{ steps.detect.outputs.node_file }}
+          # pnpm caches its own store (next step); Yarn 2+ isn't cached.
+          cache: ${{ (steps.detect.outputs.pm == 'npm' || steps.detect.outputs.pm == 'yarn') && steps.detect.outputs.pm || '' }}
+          cache-dependency-path: ${{ steps.detect.outputs.lockfile }}
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        if: steps.detect.outputs.pm == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ steps.detect.outputs.pnpm_version }}
+          package_json_file: ${{ steps.detect.outputs.root_pkg }}
+          cache: true
+          cache_dependency_path: ${{ steps.detect.outputs.lockfile }}
+
+      - name: Enable Corepack (Yarn 2+)
+        if: steps.detect.outputs.pm == 'yarn-berry'
+        run: |
+          # Corepack installs the Yarn version from packageManager. Recent Node versions
+          # don't bundle it, so install it first.
+          npm install --global corepack@0.36.0
+          corepack enable
+
+      - name: Install dependencies
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.root }}
+        env:
+          INSTALL: ${{ steps.detect.outputs.install }}
+        run: |
+          # shellcheck disable=SC2086  # unquoted on purpose: the command has arguments
+          ${INSTALL}
+
+      - name: Lint
+        id: lint
+        if: steps.detect.outputs.lint != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          RUN: ${{ steps.detect.outputs.run }}
+          SCRIPT: ${{ steps.detect.outputs.lint }}
+        run: '"${RUN}" run "${SCRIPT}"'
+
+      - name: Type check
+        id: typecheck
+        if: steps.detect.outputs.typecheck != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          RUN: ${{ steps.detect.outputs.run }}
+          SCRIPT: ${{ steps.detect.outputs.typecheck }}
+        run: '"${RUN}" run "${SCRIPT}"'
+
+      - name: Test
+        id: test
+        if: steps.detect.outputs.test != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          RUN: ${{ steps.detect.outputs.run }}
+          SCRIPT: ${{ steps.detect.outputs.test }}
+        run: '"${RUN}" run "${SCRIPT}"'
+
+      - name: Build
+        id: build
+        if: steps.detect.outputs.build != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          RUN: ${{ steps.detect.outputs.run }}
+          SCRIPT: ${{ steps.detect.outputs.build }}
+        run: '"${RUN}" run "${SCRIPT}"'
+
+      - name: Summary
+        if: always() && steps.detect.outputs.found == 'true'
+        env:
+          DIR: ${{ steps.detect.outputs.dir }}
+          PM: ${{ steps.detect.outputs.pm }}
+          LOCKFILE: ${{ steps.detect.outputs.lockfile }}
+          NODE: ${{ steps.node.outputs.node-version }}
+          LINT: ${{ steps.detect.outputs.lint }}|${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.detect.outputs.typecheck }}|${{ steps.typecheck.outcome }}
+          TEST: ${{ steps.detect.outputs.test }}|${{ steps.test.outcome }}
+          BUILD: ${{ steps.detect.outputs.build }}|${{ steps.build.outcome }}
+        run: |
+          row() {
+            local script="${2%%|*}" outcome="${2#*|}" icon
+            case "${outcome}" in
+              success) icon="✅" ;;
+              failure) icon="❌" ;;
+              skipped) icon="—"; outcome="skipped (an earlier step failed)" ;;
+              *) icon="—" ;;
+            esac
+            if [ -z "${script}" ]; then
+              echo "| $1 | — | not run (no script) |"
+            else
+              echo "| $1 | \`${script}\` | ${icon} ${outcome:-not reached} |"
+            fi
+          }
+          {
+            echo "### Node CI: \`${DIR}\`"
+            echo
+            echo "Node ${NODE:-?} · ${PM} (\`${LOCKFILE}\`)"
+            echo
+            echo "| Step | Script | Result |"
+            echo "|---|---|---|"
+            row Lint "${LINT}"
+            row "Type check" "${TYPECHECK}"
+            row Test "${TEST}"
+            row Build "${BUILD}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,14 @@
+{
+  "name": "fixture-node-yarn",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture for node-ci.yml's self-test. No dependencies.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "node -e \"console.log('lint ok')\"",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "node -e \"console.log('build ok')\""
+  }
+}

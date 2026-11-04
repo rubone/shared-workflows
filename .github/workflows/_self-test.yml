@@ -93,3 +93,24 @@ jobs:
     uses: ./.github/workflows/stale.yml
     with:
       dry_run: true
+
+  # Smoke test of call mode on the fixtures in tests/fixtures (one per package manager,
+  # no dependencies), plus the repo root, which has no package.json and must skip with
+  # a warning.
+  node-ci:
+    name: Node CI (smoke test, ${{ matrix.project }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - tests/fixtures/node-npm          # .nvmrc, all four scripts
+          - tests/fixtures/node-pnpm         # packageManager, test:ci over test, no typecheck
+          - tests/fixtures/node-yarn         # Yarn 1, engines.node, npm init's test placeholder
+          - tests/fixtures/node-yarn-berry   # Yarn 4 through Corepack, type-check script
+          - .                                # no package.json: skipped with a warning
+    permissions:
+      contents: read
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      working_directory: ${{ matrix.project }}

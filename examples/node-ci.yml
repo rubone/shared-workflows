@@ -1,0 +1,25 @@
+# Call mode: copy to .github/workflows/node-ci.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy .github/workflows/node-ci.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/node-ci.md
+name: Node CI
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  node-ci:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      contents: read
+    uses: rubone/shared-workflows/.github/workflows/node-ci.yml@v1
+    with:
+      working_directory: '.'          # folder with package.json
+      node_version: ''                # '' = from .nvmrc / .node-version / package.json
+      test_script: 'test:ci,test'     # first one that exists runs; 'off' = skip
