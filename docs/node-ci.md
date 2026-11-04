@@ -179,13 +179,13 @@ A new push to the same PR cancels the run in progress.
 ## Verify
 
 1. Merge the workflow to `main` (copy mode), or add the caller.
-2. Open a PR. The **Build and test** job lists the detected setup in the **Detect project**
+2. Open a PR. The **Node build and test** job lists the detected setup in the **Detect project**
    step and the results in the job summary.
 3. To see it fail, push a lint error: the **Lint** step fails and the next ones are skipped.
 
-To require it before merging, add **Build and test** (copy mode) or **node-ci / Build and
-test** (call mode, if the caller's job is called `node-ci`) to the required status checks
-in **Settings → Rules → Rulesets**.
+To require it before merging, add **Node build and test** (copy mode) or **node-ci / Node
+build and test** (call mode, if the caller's job is called `node-ci`) to the required status
+checks in **Settings → Rules → Rulesets**.
 
 ---
 

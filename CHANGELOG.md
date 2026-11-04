@@ -41,6 +41,13 @@ changes to inputs, secrets or behavior require a new major version.
   `package.json`. Skips with a warning when there's no `package.json`. Uses
   `actions/setup-node` v7.1.0 and `pnpm/action-setup` v6.1.0 pinned by SHA. Copy and call
   modes.
-- `tests/fixtures/`: sample projects (npm, pnpm, Yarn 1, Yarn 4) for the self-test.
+- `dotnet-ci.yml`: restores with a NuGet cache (locked mode with `packages.lock.json`),
+  checks formatting with `dotnet format` when there's an `.editorconfig`, builds and runs the
+  tests (VSTest or Microsoft.Testing.Platform), with test totals in the job summary. Finds the
+  `.slnx`/`.sln` and takes the SDK from `global.json`. Skips with a warning when there's no
+  solution or project. Uses `actions/setup-dotnet` v6.0.0 and `actions/cache` v6.1.0 pinned by
+  SHA. Copy and call modes.
+- `tests/fixtures/`: sample projects (npm, pnpm, Yarn 1, Yarn 4, .NET 10 with xUnit) for the
+  self-test.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.

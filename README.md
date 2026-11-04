@@ -46,6 +46,7 @@ shared-workflows/
 | [`pr-checks.yml`](.github/workflows/pr-checks.yml) | Checks that the PR title follows Conventional Commits, and labels the PR by size (`size/XS`…`size/XL`) and by changed paths. | [docs](docs/pr-checks.md) | [caller](examples/pr-checks.yml), [labeler](examples/labeler.yml) |
 | [`stale.yml`](.github/workflows/stale.yml) | Daily: marks issues and PRs with no activity as `stale` and closes them later if nothing happens. Dry-run mode to try it safely. | [docs](docs/stale.md) | [caller](examples/stale.yml) |
 | [`node-ci.yml`](.github/workflows/node-ci.yml) | Installs with cache and runs the project's lint, type check, test and build scripts. Detects npm, pnpm or Yarn and the Node version. React, Angular, Vue, Next.js, Node backends. | [docs](docs/node-ci.md) | [caller](examples/node-ci.yml) |
+| [`dotnet-ci.yml`](.github/workflows/dotnet-ci.yml) | Restores with cache, checks formatting (with `.editorconfig`), builds and runs the tests of a .NET solution. SDK from `global.json`. | [docs](docs/dotnet-ci.md) | [caller](examples/dotnet-ci.yml) |
 
 ### Repo settings each workflow needs
 
@@ -61,6 +62,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `pr-checks.yml` | Optional `.github/labeler.yml` for path labels. Recommended: squash merge only, with the PR title as commit message | — | — |
 | `stale.yml` | Nothing | — | — |
 | `node-ci.yml` | A committed lockfile | — | — |
+| `dotnet-ci.yml` | Nothing | — | — |
 
 Recommended, though no workflow depends on them:
 
