@@ -6,6 +6,8 @@ changes to inputs, secrets or behavior require a new major version.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-05
+
 ### Changed
 - `pr_slack_notify.yml` works in two modes from the same file:
   - **Copy:** keeps its `pull_request` trigger; set `JIRA_BASE_URL` and `SLACK_MENTION_IDS`
@@ -66,3 +68,6 @@ changes to inputs, secrets or behavior require a new major version.
   with AGP 9, Flutter 3.47) for the self-test.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.
+
+[Unreleased]: https://github.com/rubone/shared-workflows/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/rubone/shared-workflows/releases/tag/v1.0.0
