@@ -133,3 +133,23 @@ jobs:
     with:
       working_directory: ${{ matrix.project }}
       warnings_as_errors: true
+
+  # Smoke test of call mode on tests/fixtures/android (Kotlin DSL, version catalog, AGP 9,
+  # JUnit), plus the repo root, which has no gradlew and must skip with a warning. The
+  # nested dependency-graph job asks for contents: write, so the caller must grant it; it
+  # only runs on pushes to the default branch, never on these PRs.
+  android-ci:
+    name: Android CI (smoke test, ${{ matrix.project }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - tests/fixtures/android
+          - .
+    permissions:
+      contents: write
+    uses: ./.github/workflows/android-ci.yml
+    with:
+      working_directory: ${{ matrix.project }}
+      apk_retention_days: 1

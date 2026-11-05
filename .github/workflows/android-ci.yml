@@ -1,0 +1,339 @@
+# Android CI: runs Android Lint, the unit tests and the debug APK build of a Gradle
+# project, with Gradle caching and the APK uploaded as an artifact. Kotlin DSL or Groovy.
+#
+# Detected from the project, nothing to set in most repos:
+#   - The Gradle wrapper (gradlew) and an Android plugin in WORKING_DIRECTORY.
+#   - Tasks from VARIANT: 'debug' -> lintDebug, testDebugUnitTest, assembleDebug;
+#     with flavors, e.g. 'devDebug' -> lintDevDebug, testDevDebugUnitTest, assembleDevDebug.
+# Without gradlew or an Android plugin, it skips with a warning (run stays green). Flutter
+# projects are skipped too: use flutter-ci.yml.
+#
+# On pushes to the default branch, a second job submits the resolved Gradle dependencies to
+# the dependency graph, so Dependabot alerts and dependency review cover them (GitHub can't
+# read Gradle dependencies from the build files alone).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The pull_request / push triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        android-ci:
+#          permissions: { contents: write }   # write: only for the dependency graph job
+#          uses: rubone/shared-workflows/.github/workflows/android-ci.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/android-ci.md
+name: Android CI
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder with gradlew, relative to the repo root. Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      java_version:
+        description: "JDK version (e.g. '21'). Overrides env.JAVA_VERSION."
+        type: string
+        required: false
+        default: ''
+      variant:
+        description: "Build variant (e.g. 'debug', 'devDebug'). Overrides env.VARIANT."
+        type: string
+        required: false
+        default: ''
+      steps:
+        description: "Comma-separated steps to run: lint, test, assemble. Overrides env.STEPS."
+        type: string
+        required: false
+        default: ''
+      apk_retention_days:
+        description: "Days to keep the APK artifact (1-90). 0 falls back to env.APK_RETENTION_DAYS."
+        type: number
+        required: false
+        default: 0
+      submit_dependencies:
+        description: "'true' or 'false': submit Gradle dependencies to the dependency graph on pushes to the default branch. Overrides env.SUBMIT_DEPENDENCIES."
+        type: string
+        required: false
+        default: ''
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder with gradlew and settings.gradle(.kts), relative to the repo root ('.' = root).
+  WORKING_DIRECTORY: '.'
+  # JDK used to run Gradle and compile. AGP 8+ needs 17 or newer.
+  JAVA_VERSION: '21'
+  JAVA_DISTRIBUTION: 'temurin'
+  # Build variant: buildType, or flavor + buildType in camelCase (e.g. 'devDebug').
+  VARIANT: 'debug'
+  # Steps to run, comma-separated: lint (Android Lint), test (unit tests on the JVM),
+  # assemble (build the APK and upload it as an artifact).
+  STEPS: 'lint,test,assemble'
+  # Days to keep the APK artifact (1-90).
+  APK_RETENTION_DAYS: '7'
+  # 'true' = on pushes to the default branch, submit the Gradle dependencies to the
+  # dependency graph (needs it enabled in Settings → Advanced Security).
+  SUBMIT_DEPENDENCIES: 'true'
+  # Gradle cache: 'basic' (open source, free everywhere) or 'enhanced' (Gradle's
+  # proprietary cache: free for public repos, a free preview for private ones).
+  GRADLE_CACHE_PROVIDER: 'basic'
+
+jobs:
+  ci:
+    name: Android build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    # A new push to the same PR cancels the previous run.
+    concurrency:
+      group: android-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.working_directory }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    outputs:
+      found: ${{ steps.detect.outputs.found }}
+      dir: ${{ steps.detect.outputs.dir }}
+      java_version: ${{ steps.detect.outputs.java_version }}
+      submit: ${{ steps.detect.outputs.submit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect project
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          JAVA_VERSION: ${{ inputs.java_version || env.JAVA_VERSION }}
+          VARIANT: ${{ inputs.variant || env.VARIANT }}
+          STEPS: ${{ inputs.steps || env.STEPS }}
+          APK_RETENTION_DAYS: ${{ inputs.apk_retention_days || env.APK_RETENTION_DAYS }}
+          SUBMIT_DEPENDENCIES: ${{ inputs.submit_dependencies || env.SUBMIT_DEPENDENCIES }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"
+          dir="${dir#./}"
+          dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a folder inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          if ! [[ "${VARIANT}" =~ ^[a-z][A-Za-z0-9]*$ ]]; then
+            echo "::error::VARIANT must be a variant name in camelCase (e.g. 'debug', 'devDebug'). Got: '${VARIANT}'."
+            exit 1
+          fi
+          if ! [[ "${APK_RETENTION_DAYS}" =~ ^[0-9]+$ ]] || [ "${APK_RETENTION_DAYS}" -lt 1 ] || [ "${APK_RETENTION_DAYS}" -gt 90 ]; then
+            echo "::error::APK_RETENTION_DAYS must be a number from 1 to 90. Got: '${APK_RETENTION_DAYS}'."
+            exit 1
+          fi
+          case "${SUBMIT_DEPENDENCIES}" in true|false) ;; *)
+            echo "::error::SUBMIT_DEPENDENCIES must be 'true' or 'false'. Got: '${SUBMIT_DEPENDENCIES}'."; exit 1 ;;
+          esac
+          lint=false; test=false; assemble=false
+          for s in ${STEPS//,/ }; do
+            case "${s}" in
+              lint|test|assemble) printf -v "${s}" true ;;
+              *) echo "::error::Unknown step '${s}' in STEPS. Use: lint, test, assemble."; exit 1 ;;
+            esac
+          done
+
+          skip() {
+            echo "::warning::$1"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          # A Flutter app's android/ folder needs the Flutter SDK to build.
+          d="${dir}"
+          while :; do
+            [ -f "${d}/pubspec.yaml" ] && skip "'${dir}' is part of a Flutter project (${d}/pubspec.yaml); skipping Android CI. Use flutter-ci.yml."
+            [ "${d}" = "." ] && break
+            d=$(dirname "${d}")
+          done
+          [ -f "${dir}/gradlew" ] || skip "No gradlew in '${dir}'; skipping Android CI. If the project is in a subfolder, set WORKING_DIRECTORY; if gradlew isn't committed, run 'gradle wrapper' and commit it."
+          if ! find "${dir}" \( -name build -o -name .gradle -o -name .git \) -prune -o -type f \
+               \( -name '*.gradle.kts' -o -name '*.gradle' -o -name '*.versions.toml' \) -print0 \
+               | xargs -0 grep -qsE 'com\.android\.(application|library|test|dynamic-feature)'; then
+            skip "No Android Gradle plugin (com.android.application or com.android.library) in '${dir}'; skipping Android CI."
+          fi
+          if [ ! -x "${dir}/gradlew" ]; then
+            echo "::notice::gradlew isn't executable in git; made it executable for this run. To fix it: git update-index --chmod=+x ${dir}/gradlew"
+            chmod +x "${dir}/gradlew"
+          fi
+
+          cap="${VARIANT^}"
+          {
+            echo "found=true"
+            echo "dir=${dir}"
+            echo "slug=$(printf '%s' "${dir}" | tr -c 'A-Za-z0-9._-' '-')"
+            echo "java_version=${JAVA_VERSION}"
+            echo "variant=${VARIANT}"
+            echo "lint=$([ "${lint}" = true ] && printf 'lint%s' "${cap}")"
+            echo "test=$([ "${test}" = true ] && printf 'test%sUnitTest' "${cap}")"
+            echo "assemble=$([ "${assemble}" = true ] && printf 'assemble%s' "${cap}")"
+            echo "retention=${APK_RETENTION_DAYS}"
+            echo "submit=${SUBMIT_DEPENDENCIES}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Project: ${dir} | JDK ${JAVA_VERSION} | variant ${VARIANT} | steps: ${STEPS}"
+
+      - name: Set up JDK
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ steps.detect.outputs.java_version }}
+
+      - name: Set up Gradle
+        if: steps.detect.outputs.found == 'true'
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          # Also validates gradle-wrapper.jar against Gradle's official checksums.
+          cache-provider: ${{ env.GRADLE_CACHE_PROVIDER }}
+
+      - name: Lint
+        id: lint
+        if: steps.detect.outputs.lint != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TASK: ${{ steps.detect.outputs.lint }}
+        run: ./gradlew "${TASK}"
+
+      - name: Unit tests
+        id: test
+        if: steps.detect.outputs.test != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TASK: ${{ steps.detect.outputs.test }}
+        run: ./gradlew "${TASK}"
+
+      - name: Build APK
+        id: assemble
+        if: steps.detect.outputs.assemble != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TASK: ${{ steps.detect.outputs.assemble }}
+        run: ./gradlew "${TASK}"
+
+      - name: Upload APK
+        if: steps.assemble.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-${{ steps.detect.outputs.variant }}-${{ steps.detect.outputs.slug }}
+          path: ${{ steps.detect.outputs.dir }}/**/build/outputs/apk/**/*.apk
+          retention-days: ${{ fromJSON(steps.detect.outputs.retention) }}
+          if-no-files-found: warn
+
+      - name: Upload reports
+        if: failure() && steps.detect.outputs.found == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reports-${{ steps.detect.outputs.variant }}-${{ steps.detect.outputs.slug }}
+          path: ${{ steps.detect.outputs.dir }}/**/build/reports/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: always() && steps.detect.outputs.found == 'true'
+        env:
+          DIR: ${{ steps.detect.outputs.dir }}
+          VARIANT: ${{ steps.detect.outputs.variant }}
+          LINT: ${{ steps.detect.outputs.lint }}|${{ steps.lint.outcome }}
+          TEST: ${{ steps.detect.outputs.test }}|${{ steps.test.outcome }}
+          ASSEMBLE: ${{ steps.detect.outputs.assemble }}|${{ steps.assemble.outcome }}
+        run: |
+          row() {
+            local task="${2%%|*}" outcome="${2#*|}" icon
+            case "${outcome}" in
+              success) icon="✅" ;;
+              failure) icon="❌" ;;
+              skipped) icon="—"; outcome="skipped (an earlier step failed)" ;;
+              *) icon="—" ;;
+            esac
+            if [ -z "${task}" ]; then
+              echo "| $1 | — | not in STEPS |"
+            else
+              echo "| $1 | \`${task}\` | ${icon} ${outcome:-not reached} |"
+            fi
+          }
+          {
+            echo "### Android CI: \`${DIR}\` (${VARIANT})"
+            echo
+            echo "| Step | Task | Result |"
+            echo "|---|---|---|"
+            row "Lint" "${LINT}"
+            row "Unit tests" "${TEST}"
+            row "Build APK" "${ASSEMBLE}"
+            # Totals from the JUnit XML reports of the unit tests.
+            mapfile -d '' xml < <(find "${DIR}" -path '*/build/test-results/test*UnitTest/*.xml' -print0)
+            if [ "${#xml[@]}" -gt 0 ]; then
+              read -r total failed skipped < <(grep -ho '<testsuite [^>]*>' "${xml[@]}" | awk '
+                { for (i = 1; i <= NF; i++) { split($i, kv, "=\""); v = kv[2] + 0
+                    if (kv[1] == "tests") t += v; if (kv[1] == "failures" || kv[1] == "errors") f += v
+                    if (kv[1] == "skipped") s += v } }
+                END { print t + 0, f + 0, s + 0 }')
+              echo
+              echo "Unit tests: ${total} total, $((total - failed - skipped)) passed, ${failed} failed, ${skipped} skipped."
+            fi
+            mapfile -d '' apks < <(find "${DIR}" -path '*/build/outputs/apk/*' -name '*.apk' -print0)
+            if [ "${#apks[@]}" -gt 0 ]; then
+              echo
+              echo "APK (in the run's artifacts):"
+              for a in "${apks[@]}"; do
+                echo "- \`${a#"${DIR}"/}\` ($(( $(stat -c %s "${a}") / 1024 )) KB)"
+              done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Submits the resolved Gradle dependencies to the dependency graph. Runs only on pushes to
+  # the default branch (trusted code), so it can use a write token.
+  dependency-graph:
+    name: Submit Gradle dependencies
+    needs: ci
+    if: >-
+      needs.ci.outputs.found == 'true' && needs.ci.outputs.submit == 'true'
+      && github.event_name == 'push'
+      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write   # dependency submission API
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ needs.ci.outputs.java_version }}
+
+      - name: Submit dependencies
+        id: submit
+        continue-on-error: true
+        uses: gradle/actions/dependency-submission@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          build-root-directory: ${{ needs.ci.outputs.dir }}
+          cache-provider: ${{ env.GRADLE_CACHE_PROVIDER }}
+
+      - name: Report
+        if: steps.submit.outcome == 'failure'
+        run: |
+          echo "::warning::Couldn't submit the Gradle dependencies. Check that the dependency graph is enabled (Settings → Advanced Security), or set SUBMIT_DEPENDENCIES: 'false'. The build itself passed."
