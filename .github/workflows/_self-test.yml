@@ -137,10 +137,11 @@ jobs:
   # Smoke test of call mode on tests/fixtures/android (Kotlin DSL, version catalog, AGP 9,
   # JUnit), plus the repo root, which has no gradlew and must skip with a warning. The
   # nested dependency-graph job asks for contents: write, so the caller must grant it; it
-  # only runs on pushes to the default branch, never on these PRs.
+  # never runs on PRs. Also runs on manual runs: `gh workflow run _self-test.yml --ref main`
+  # tests the dependency submission and saves the Gradle cache that PRs then restore.
   android-ci:
     name: Android CI (smoke test, ${{ matrix.project }})
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
