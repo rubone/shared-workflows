@@ -157,10 +157,11 @@ jobs:
 
   # Smoke test of call mode on tests/fixtures/flutter (Flutter pinned with .fvmrc, Android
   # host app in Java so CodeQL doesn't need a Kotlin build), with both build targets, plus
-  # the repo root, which has no pubspec.yaml and must skip with a warning.
+  # the repo root, which has no pubspec.yaml and must skip with a warning. Also runs on
+  # manual runs on main, which save the Flutter SDK, pub and Gradle caches that PRs restore.
   flutter-ci:
     name: Flutter CI (smoke test, ${{ matrix.project }}, ${{ matrix.build_target }})
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:

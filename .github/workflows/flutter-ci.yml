@@ -361,14 +361,27 @@ jobs:
             row "Analyze" "flutter analyze" "${ANALYZE}"
             row "Test" "flutter test" "${TEST}"
             row "Build" "${build_cmd}" "${BUILD}"
-            # Totals from the last progress line of flutter test: "00:05 +12 ~1 -2: ...".
+            # Totals from flutter test's output. On GitHub Actions it uses the github reporter,
+            # which ends with "N tests passed, F failed, S skipped."; other reporters print
+            # progress lines like "00:05 +12 ~1 -2: ...".
             log="${RUNNER_TEMP}/flutter-test.log"
             if [ -f "${log}" ]; then
-              last=$(sed 's/\x1b\[[0-9;]*m//g' "${log}" | grep -oE '^[0-9:]+ \+[0-9]+( ~[0-9]+)?( -[0-9]+)?:' | tail -n 1 || true)
+              clean=$(sed 's/\x1b\[[0-9;]*m//g' "${log}")
+              passed=''; failed=''; skipped=''
+              last=$(grep -oE '[0-9]+ tests? passed[^.]*\.' <<< "${clean}" | tail -n 1 || true)
               if [ -n "${last}" ]; then
-                passed=$(grep -oE '\+[0-9]+' <<< "${last}" | tr -d '+')
-                skipped=$(grep -oE '~[0-9]+' <<< "${last}" | tr -d '~' || true)
-                failed=$(grep -oE ' -[0-9]+' <<< "${last}" | tr -d ' -' || true)
+                passed=$(grep -oE '^[0-9]+' <<< "${last}")
+                failed=$(grep -oE '[0-9]+ failed' <<< "${last}" | grep -oE '[0-9]+' || true)
+                skipped=$(grep -oE '[0-9]+ skipped' <<< "${last}" | grep -oE '[0-9]+' || true)
+              else
+                last=$(grep -oE '^[0-9:]+ \+[0-9]+( ~[0-9]+)?( -[0-9]+)?:' <<< "${clean}" | tail -n 1 || true)
+                if [ -n "${last}" ]; then
+                  passed=$(grep -oE '\+[0-9]+' <<< "${last}" | tr -d '+')
+                  skipped=$(grep -oE '~[0-9]+' <<< "${last}" | tr -d '~' || true)
+                  failed=$(grep -oE ' -[0-9]+' <<< "${last}" | tr -d ' -' || true)
+                fi
+              fi
+              if [ -n "${passed}" ]; then
                 echo
                 echo "Tests: ${passed} passed, ${failed:-0} failed, ${skipped:-0} skipped."
               fi
