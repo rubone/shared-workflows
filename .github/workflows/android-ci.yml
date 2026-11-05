@@ -8,9 +8,9 @@
 # Without gradlew or an Android plugin, it skips with a warning (run stays green). Flutter
 # projects are skipped too: use flutter-ci.yml.
 #
-# On pushes (and manual or scheduled runs) on the default branch, a second job submits the resolved Gradle dependencies to
-# the dependency graph, so Dependabot alerts and dependency review cover them (GitHub can't
-# read Gradle dependencies from the build files alone).
+# On pushes (and manual or scheduled runs) on the default branch, a second job submits the
+# resolved Gradle dependencies to the dependency graph, so Dependabot alerts cover them
+# (GitHub can't read Gradle dependencies from the build files alone).
 #
 # Two ways to use this same file:
 #

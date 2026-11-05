@@ -1,0 +1,386 @@
+# Flutter CI: checks the formatting, runs flutter analyze and the tests, and builds the
+# app (debug APK or web) with the result uploaded as an artifact.
+#
+# Detected from the project, nothing to set in most repos:
+#   - pubspec.yaml with the Flutter SDK as a dependency, in WORKING_DIRECTORY.
+#   - Flutter version: .fvmrc or .fvm/fvm_config.json (FVM), else an exact version in
+#     pubspec.yaml -> environment.flutter, else the latest stable.
+#   - pubspec.lock: if committed, dependencies must match it (--enforce-lockfile).
+#   - build_runner in dev_dependencies: code generation runs before analyze.
+#   - Packages and plugins (no app to build) run everything except the build.
+# Without a Flutter pubspec.yaml, it skips with a warning (run stays green).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The pull_request / push triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        flutter-ci:
+#          permissions: { contents: read }
+#          uses: rubone/shared-workflows/.github/workflows/flutter-ci.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/flutter-ci.md
+name: Flutter CI
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder with pubspec.yaml, relative to the repo root. Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      flutter_version:
+        description: "Flutter version (e.g. '3.47.9', '3.47.x') or channel ('stable', 'beta'). Empty = detect. Overrides env.FLUTTER_VERSION."
+        type: string
+        required: false
+        default: ''
+      steps:
+        description: "Comma-separated steps to run: format, analyze, test, build. Overrides env.STEPS."
+        type: string
+        required: false
+        default: ''
+      build_target:
+        description: "'apk' (debug APK) or 'web'. Overrides env.BUILD_TARGET."
+        type: string
+        required: false
+        default: ''
+      codegen:
+        description: "'auto', 'true' or 'false': run build_runner before analyze. Overrides env.CODEGEN."
+        type: string
+        required: false
+        default: ''
+      java_version:
+        description: "JDK for the APK build (e.g. '17'). Overrides env.JAVA_VERSION."
+        type: string
+        required: false
+        default: ''
+      artifact_retention_days:
+        description: "Days to keep the build artifact (1-90). 0 falls back to env.ARTIFACT_RETENTION_DAYS."
+        type: number
+        required: false
+        default: 0
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder with pubspec.yaml, relative to the repo root ('.' = root).
+  WORKING_DIRECTORY: '.'
+  # Flutter version ('3.47.9', '3.47.x') or channel ('stable', 'beta'). Empty = detect:
+  # .fvmrc, .fvm/fvm_config.json, pubspec.yaml environment.flutter, else the latest stable.
+  FLUTTER_VERSION: ''
+  # Steps to run, comma-separated: format (dart format), analyze (flutter analyze),
+  # test (flutter test), build (BUILD_TARGET, uploaded as an artifact).
+  STEPS: 'format,analyze,test,build'
+  # What the build step builds: 'apk' (debug, unsigned for release) or 'web'.
+  BUILD_TARGET: 'apk'
+  # build_runner code generation before analyze: 'auto' = when build_runner is in
+  # dev_dependencies; 'true'; 'false' (generated files are committed).
+  CODEGEN: 'auto'
+  # JDK for the APK build. 17 works with every Gradle version Flutter's templates use.
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'temurin'
+  # Days to keep the build artifact (1-90).
+  ARTIFACT_RETENTION_DAYS: '7'
+  # Gradle cache for the APK build: 'basic' (open source, free everywhere) or 'enhanced'
+  # (Gradle's proprietary cache: free for public repos, a free preview for private ones).
+  GRADLE_CACHE_PROVIDER: 'basic'
+
+jobs:
+  ci:
+    name: Flutter build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    # A new push to the same PR cancels the previous run.
+    concurrency:
+      group: flutter-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.working_directory }}-${{ inputs.build_target }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect project
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          FLUTTER_VERSION: ${{ inputs.flutter_version || env.FLUTTER_VERSION }}
+          STEPS: ${{ inputs.steps || env.STEPS }}
+          BUILD_TARGET: ${{ inputs.build_target || env.BUILD_TARGET }}
+          CODEGEN: ${{ inputs.codegen || env.CODEGEN }}
+          JAVA_VERSION: ${{ inputs.java_version || env.JAVA_VERSION }}
+          ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days || env.ARTIFACT_RETENTION_DAYS }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"
+          dir="${dir#./}"
+          dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a folder inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          case "${BUILD_TARGET}" in apk|web) ;; *)
+            echo "::error::BUILD_TARGET must be 'apk' or 'web'. Got: '${BUILD_TARGET}'."; exit 1 ;;
+          esac
+          case "${CODEGEN}" in auto|true|false) ;; *)
+            echo "::error::CODEGEN must be 'auto', 'true' or 'false'. Got: '${CODEGEN}'."; exit 1 ;;
+          esac
+          if ! [[ "${ARTIFACT_RETENTION_DAYS}" =~ ^[0-9]+$ ]] || [ "${ARTIFACT_RETENTION_DAYS}" -lt 1 ] || [ "${ARTIFACT_RETENTION_DAYS}" -gt 90 ]; then
+            echo "::error::ARTIFACT_RETENTION_DAYS must be a number from 1 to 90. Got: '${ARTIFACT_RETENTION_DAYS}'."
+            exit 1
+          fi
+          format=false; analyze=false; test=false; build=false
+          for s in ${STEPS//,/ }; do
+            case "${s}" in
+              format|analyze|test|build) printf -v "${s}" true ;;
+              *) echo "::error::Unknown step '${s}' in STEPS. Use: format, analyze, test, build."; exit 1 ;;
+            esac
+          done
+
+          skip() {
+            echo "::warning::$1"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          pubspec="${dir}/pubspec.yaml"
+          [ -f "${pubspec}" ] || skip "No pubspec.yaml in '${dir}'; skipping Flutter CI. If the app is in a subfolder, set WORKING_DIRECTORY."
+          command -v yq > /dev/null || { echo "::error::yq is needed to read pubspec.yaml (preinstalled on GitHub's Ubuntu runners)."; exit 1; }
+          # yq prints "null" for missing keys.
+          yqr() { yq -r "$1" "${pubspec}"; }
+          [ "$(yqr '.dependencies.flutter.sdk')" = "flutter" ] \
+            || skip "'${pubspec}' doesn't depend on the Flutter SDK (a pure Dart package?); skipping Flutter CI."
+
+          # Flutter version: setting, FVM config (here or in a parent folder), pubspec.yaml.
+          version="${FLUTTER_VERSION}"; source="FLUTTER_VERSION"
+          if [ -z "${version}" ]; then
+            d="${dir}"
+            while :; do
+              if [ -f "${d}/.fvmrc" ]; then
+                version=$(jq -r '.flutter // empty' "${d}/.fvmrc"); source="${d}/.fvmrc"; break
+              elif [ -f "${d}/.fvm/fvm_config.json" ]; then
+                version=$(jq -r '.flutterSdkVersion // .flutter // empty' "${d}/.fvm/fvm_config.json"); source="${d}/.fvm/fvm_config.json"; break
+              fi
+              [ "${d}" = "." ] && break
+              d=$(dirname "${d}")
+            done
+          fi
+          if [ -z "${version}" ]; then
+            constraint=$(yqr '.environment.flutter // ""')
+            if [[ "${constraint}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
+              version="${constraint}"; source="pubspec.yaml"
+            else
+              source="no version pinned"
+              echo "::notice::No Flutter version pinned${constraint:+ (environment.flutter is a range: ${constraint})}; using the latest stable. Pin it with FVM (.fvmrc) or FLUTTER_VERSION so a new Flutter release can't break CI."
+            fi
+          fi
+          # FVM's "version@channel" form, and channels given as the version.
+          channel=stable
+          if [[ "${version}" == *@* ]]; then channel="${version#*@}"; version="${version%@*}"; fi
+          case "${version}" in
+            stable|beta|main|master) channel="${version}"; version='' ;;
+            *.pre) channel=beta ;;
+          esac
+
+          lockfile=false
+          if [ -f "${dir}/pubspec.lock" ]; then
+            lockfile=true
+          else
+            echo "::notice::No pubspec.lock in '${dir}': dependencies resolve to the newest allowed versions. Apps should commit it."
+          fi
+
+          if [ "${CODEGEN}" = auto ]; then
+            CODEGEN=false
+            [ "$(yqr '.dev_dependencies.build_runner // .dependencies.build_runner')" != "null" ] && CODEGEN=true
+          fi
+
+          if [ "${test}" = true ] && [ -z "$(find "${dir}/test" -name '*_test.dart' -print -quit 2> /dev/null)" ]; then
+            echo "::notice::Test skipped: no *_test.dart files in '${dir}/test'."
+            test=false
+          fi
+
+          if [ "${build}" = true ]; then
+            platform_dir=android; [ "${BUILD_TARGET}" = web ] && platform_dir=web
+            if [ "$(yqr '.flutter.plugin')" != "null" ] || [ ! -f "${dir}/lib/main.dart" ]; then
+              echo "::notice::Build skipped: '${dir}' is a package or plugin, not an app (no lib/main.dart, or a flutter.plugin section in pubspec.yaml)."
+              build=false
+            elif [ ! -d "${dir}/${platform_dir}" ]; then
+              echo "::notice::Build skipped: BUILD_TARGET is '${BUILD_TARGET}' but there's no ${platform_dir}/ folder. Add it with 'flutter create --platforms ${platform_dir} .', or change BUILD_TARGET."
+              build=false
+            fi
+          fi
+
+          {
+            echo "found=true"
+            echo "dir=${dir}"
+            echo "slug=$(printf '%s' "${dir}" | tr -c 'A-Za-z0-9._-' '-')"
+            echo "version=${version}"
+            echo "channel=${channel}"
+            echo "lockfile=${lockfile}"
+            echo "codegen=${CODEGEN}"
+            echo "format=${format}"
+            echo "analyze=${analyze}"
+            echo "test=${test}"
+            echo "build=$([ "${build}" = true ] && echo "${BUILD_TARGET}")"
+            echo "java_version=${JAVA_VERSION}"
+            echo "retention=${ARTIFACT_RETENTION_DAYS}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Project: ${dir} | Flutter ${version:-latest} on ${channel} (${source}) | lockfile: ${lockfile} | codegen: ${CODEGEN} | steps: ${STEPS} | build: ${BUILD_TARGET}"
+
+      - name: Set up JDK
+        if: steps.detect.outputs.build == 'apk'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ steps.detect.outputs.java_version }}
+
+      - name: Set up Gradle
+        if: steps.detect.outputs.build == 'apk'
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: ${{ env.GRADLE_CACHE_PROVIDER }}
+
+      - name: Set up Flutter
+        if: steps.detect.outputs.found == 'true'
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ steps.detect.outputs.version }}
+          channel: ${{ steps.detect.outputs.channel }}
+          cache: true       # Flutter SDK
+          pub-cache: true   # ~/.pub-cache, keyed on pubspec.lock
+
+      - name: Install dependencies
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          LOCKFILE: ${{ steps.detect.outputs.lockfile }}
+        run: |
+          if [ "${LOCKFILE}" = true ]; then
+            flutter pub get --enforce-lockfile
+          else
+            flutter pub get
+          fi
+
+      - name: Check formatting
+        id: format
+        if: steps.detect.outputs.format == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Generate code
+        if: steps.detect.outputs.found == 'true' && steps.detect.outputs.codegen == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Analyze
+        id: analyze
+        if: steps.detect.outputs.analyze == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: flutter analyze
+
+      - name: Test
+        id: test
+        if: steps.detect.outputs.test == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          set -o pipefail
+          flutter test 2>&1 | tee "${RUNNER_TEMP}/flutter-test.log"
+
+      - name: Build
+        id: build
+        if: steps.detect.outputs.build != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TARGET: ${{ steps.detect.outputs.build }}
+        run: |
+          case "${TARGET}" in
+            apk) flutter build apk --debug ;;
+            web) flutter build web ;;
+          esac
+
+      - name: Upload build
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.detect.outputs.build }}-${{ steps.detect.outputs.slug }}
+          path: ${{ steps.detect.outputs.dir }}/${{ steps.detect.outputs.build == 'apk' && 'build/app/outputs/flutter-apk/*.apk' || 'build/web/' }}
+          retention-days: ${{ fromJSON(steps.detect.outputs.retention) }}
+          if-no-files-found: warn
+
+      - name: Summary
+        if: always() && steps.detect.outputs.found == 'true'
+        env:
+          DIR: ${{ steps.detect.outputs.dir }}
+          TARGET: ${{ steps.detect.outputs.build }}
+          FORMAT: ${{ steps.detect.outputs.format }}|${{ steps.format.outcome }}
+          ANALYZE: ${{ steps.detect.outputs.analyze }}|${{ steps.analyze.outcome }}
+          TEST: ${{ steps.detect.outputs.test }}|${{ steps.test.outcome }}
+          BUILD: ${{ steps.detect.outputs.build != '' }}|${{ steps.build.outcome }}
+        run: |
+          row() {
+            local enabled="${3%%|*}" outcome="${3#*|}" icon
+            case "${outcome}" in
+              success) icon="✅" ;;
+              failure) icon="❌" ;;
+              skipped) icon="—"; outcome="skipped (an earlier step failed)" ;;
+              *) icon="—" ;;
+            esac
+            if [ "${enabled}" != true ]; then
+              echo "| $1 | \`$2\` | — not run (see the Detect project step) |"
+            else
+              echo "| $1 | \`$2\` | ${icon} ${outcome:-not reached} |"
+            fi
+          }
+          version=$(flutter --version --machine 2> /dev/null | jq -r '"\(.frameworkVersion) (Dart \(.dartSdkVersion | split(" ")[0]))"' || echo "not installed")
+          build_cmd="flutter build${TARGET:+ ${TARGET}}"; [ "${TARGET}" = apk ] && build_cmd="flutter build apk --debug"
+          {
+            echo "### Flutter CI: \`${DIR}\`"
+            echo
+            echo "Flutter ${version}"
+            echo
+            echo "| Step | Command | Result |"
+            echo "|---|---|---|"
+            row "Format" "dart format" "${FORMAT}"
+            row "Analyze" "flutter analyze" "${ANALYZE}"
+            row "Test" "flutter test" "${TEST}"
+            row "Build" "${build_cmd}" "${BUILD}"
+            # Totals from the last progress line of flutter test: "00:05 +12 ~1 -2: ...".
+            log="${RUNNER_TEMP}/flutter-test.log"
+            if [ -f "${log}" ]; then
+              last=$(sed 's/\x1b\[[0-9;]*m//g' "${log}" | grep -oE '^[0-9:]+ \+[0-9]+( ~[0-9]+)?( -[0-9]+)?:' | tail -n 1 || true)
+              if [ -n "${last}" ]; then
+                passed=$(grep -oE '\+[0-9]+' <<< "${last}" | tr -d '+')
+                skipped=$(grep -oE '~[0-9]+' <<< "${last}" | tr -d '~' || true)
+                failed=$(grep -oE ' -[0-9]+' <<< "${last}" | tr -d ' -' || true)
+                echo
+                echo "Tests: ${passed} passed, ${failed:-0} failed, ${skipped:-0} skipped."
+              fi
+            fi
+            if [ "${TARGET}" = apk ]; then
+              for a in "${DIR}"/build/app/outputs/flutter-apk/*.apk; do
+                [ -f "${a}" ] || continue
+                echo
+                echo "APK (in the run's artifacts): \`${a#"${DIR}"/}\` ($(( $(stat -c %s "${a}") / 1024 )) KB)"
+              done
+            elif [ "${TARGET}" = web ] && [ -d "${DIR}/build/web" ]; then
+              echo
+              echo "Web build (in the run's artifacts): \`build/web/\` ($(du -sk "${DIR}/build/web" | cut -f1) KB)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
