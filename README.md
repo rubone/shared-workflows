@@ -120,14 +120,11 @@ Which mode to pick:
 
 ## Versioning
 
-> **No release yet.** The first one (`v1.0.0`) will be tagged once the per-stack CI workflows
-> are done. Until then, `@v1` doesn't exist: pin a commit SHA of `main` to call a workflow, and
-> copy files from `main`.
-
 Releases are tagged with [Semantic Versioning](https://semver.org/) (`v1.0.0`), plus a moving
 major tag (`v1`) that points to the latest `v1.x.y`. Callers pin `@v1` (or a commit SHA for
-maximum safety), never `@main`. For copy mode, take the file from a release tag, not from `main`. Breaking changes to inputs, secrets or behavior bump the major
-version. See [CHANGELOG.md](CHANGELOG.md).
+maximum safety), never `@main`. For copy mode, take the file from a release tag, not from
+`main`. Breaking changes to inputs, secrets or behavior bump the major version. See
+[CHANGELOG.md](CHANGELOG.md).
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
