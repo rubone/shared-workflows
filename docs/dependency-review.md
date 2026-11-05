@@ -37,7 +37,7 @@ that sends the resolved dependencies to GitHub (*dependency submission*). Source
 |---|---|---|---|
 | Node / TypeScript, React, Angular | `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` (+ `package.json`) | ✅ Direct and transitive | Commit the lockfile. pnpm 12's two-document `pnpm-lock.yaml` isn't detected. |
 | .NET (NuGet) | `.csproj`, `.fsproj`, `.vbproj`, `.nuspec`, `packages.config` | ⚠️ Direct only | Transitive dependencies need dependency submission: turn on **Settings → Code security → Automatic dependency submission**. |
-| Android (Gradle) | — | ❌ Nothing by static parsing | Dependency submission is required: automatic (setting above) or [`gradle/actions/dependency-submission`](https://github.com/gradle/actions) in the CI. Planned for `android-ci`. |
+| Android (Gradle) | — | ❌ Nothing by static parsing | Dependency submission is required. [`android-ci.yml`](android-ci.md#dependency-graph) submits on pushes to `main`: that feeds Dependabot alerts, but a PR's new Gradle dependencies still aren't reviewed (no snapshot for the PR). |
 | Java (Maven) | `pom.xml` | ✅ Direct and transitive | — |
 | Flutter / Dart (pub) | `pubspec.lock` (+ `pubspec.yaml`) | ⚠️ Read, but few advisories exist for pub | Little to gain; keep the lockfile committed. |
 | GitHub Actions | `uses:` in `.github/workflows/*.yml` | ✅ Actions and reusable workflows | — |

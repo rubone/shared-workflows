@@ -47,7 +47,13 @@ changes to inputs, secrets or behavior require a new major version.
   `.slnx`/`.sln` and takes the SDK from `global.json`. Skips with a warning when there's no
   solution or project. Uses `actions/setup-dotnet` v6.0.0 and `actions/cache` v6.1.0 pinned by
   SHA. Copy and call modes.
-- `tests/fixtures/`: sample projects (npm, pnpm, Yarn 1, Yarn 4, .NET 10 with xUnit) for the
-  self-test.
+- `android-ci.yml`: Android Lint, unit tests and the debug APK build (uploaded as an
+  artifact) for a Gradle project, with the variant configurable for flavors. Uses
+  `actions/setup-java` v6.1.0 (JDK 21) and `gradle/actions` v6.4.0 with the open-source cache
+  provider, pinned by SHA; the Gradle wrapper is validated. On pushes to the default branch, a
+  second job submits the Gradle dependencies to the dependency graph. Skips with a warning
+  without `gradlew` or an Android plugin, and for Flutter projects. Copy and call modes.
+- `tests/fixtures/`: sample projects (npm, pnpm, Yarn 1, Yarn 4, .NET 10 with xUnit, Android
+  with AGP 9) for the self-test.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.
