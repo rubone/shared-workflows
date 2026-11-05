@@ -154,3 +154,24 @@ jobs:
     with:
       working_directory: ${{ matrix.project }}
       apk_retention_days: 1
+
+  # Smoke test of call mode on tests/fixtures/flutter (Flutter pinned with .fvmrc, Android
+  # host app in Java so CodeQL doesn't need a Kotlin build), with both build targets, plus
+  # the repo root, which has no pubspec.yaml and must skip with a warning.
+  flutter-ci:
+    name: Flutter CI (smoke test, ${{ matrix.project }}, ${{ matrix.build_target }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { project: tests/fixtures/flutter, build_target: apk }
+          - { project: tests/fixtures/flutter, build_target: web }
+          - { project: ., build_target: apk }
+    permissions:
+      contents: read
+    uses: ./.github/workflows/flutter-ci.yml
+    with:
+      working_directory: ${{ matrix.project }}
+      build_target: ${{ matrix.build_target }}
+      artifact_retention_days: 1

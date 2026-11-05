@@ -1,0 +1,27 @@
+# Call mode: copy to .github/workflows/flutter-ci.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy .github/workflows/flutter-ci.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/flutter-ci.md
+name: Flutter CI
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  flutter-ci:
+    permissions:
+      contents: read
+    uses: rubone/shared-workflows/.github/workflows/flutter-ci.yml@v1
+    with:
+      working_directory: '.'                  # folder with pubspec.yaml
+      flutter_version: ''                     # empty = .fvmrc, pubspec.yaml or latest stable
+      steps: 'format,analyze,test,build'
+      build_target: 'apk'                     # or 'web'
+      codegen: 'auto'                         # build_runner when it's a dev_dependency
+      artifact_retention_days: 7

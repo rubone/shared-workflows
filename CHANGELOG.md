@@ -50,10 +50,19 @@ changes to inputs, secrets or behavior require a new major version.
 - `android-ci.yml`: Android Lint, unit tests and the debug APK build (uploaded as an
   artifact) for a Gradle project, with the variant configurable for flavors. Uses
   `actions/setup-java` v6.1.0 (JDK 21) and `gradle/actions` v6.4.0 with the open-source cache
-  provider, pinned by SHA; the Gradle wrapper is validated. On pushes and manual or scheduled runs
-  on the default branch, a second job submits the Gradle dependencies to the dependency graph. Skips with a warning
-  without `gradlew` or an Android plugin, and for Flutter projects. Copy and call modes.
+  provider, pinned by SHA; the Gradle wrapper is validated. On pushes and manual or scheduled
+  runs on the default branch, a second job submits the Gradle dependencies to the dependency
+  graph. Skips with a warning without `gradlew` or an Android plugin, and for Flutter
+  projects. Copy and call modes.
+- `flutter-ci.yml`: checks formatting (`dart format`), runs `flutter analyze` and
+  `flutter test`, and builds the debug APK or the web app (uploaded as an artifact). Takes the
+  Flutter version from FVM (`.fvmrc`, `.fvm/fvm_config.json`) or an exact version in
+  `pubspec.yaml`, else the latest stable; enforces `pubspec.lock`; runs `build_runner` when
+  it's a dependency; packages and plugins skip the build. Skips with a warning without a
+  Flutter `pubspec.yaml`. Uses `subosito/flutter-action` v2.23.0 (SDK and pub caches),
+  `actions/setup-java` v6.1.0 (JDK 17) and `gradle/actions` v6.4.0, pinned by SHA. Copy and
+  call modes.
 - `tests/fixtures/`: sample projects (npm, pnpm, Yarn 1, Yarn 4, .NET 10 with xUnit, Android
-  with AGP 9) for the self-test.
+  with AGP 9, Flutter 3.47) for the self-test.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.

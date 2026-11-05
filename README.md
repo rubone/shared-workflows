@@ -48,6 +48,7 @@ shared-workflows/
 | [`node-ci.yml`](.github/workflows/node-ci.yml) | Installs with cache and runs the project's lint, type check, test and build scripts. Detects npm, pnpm or Yarn and the Node version. React, Angular, Vue, Next.js, Node backends. | [docs](docs/node-ci.md) | [caller](examples/node-ci.yml) |
 | [`dotnet-ci.yml`](.github/workflows/dotnet-ci.yml) | Restores with cache, checks formatting (with `.editorconfig`), builds and runs the tests of a .NET solution. SDK from `global.json`. | [docs](docs/dotnet-ci.md) | [caller](examples/dotnet-ci.yml) |
 | [`android-ci.yml`](.github/workflows/android-ci.yml) | Android Lint, unit tests and the debug APK (uploaded as an artifact), with Gradle caching. Variant configurable for flavors. Submits the Gradle dependencies to the dependency graph on pushes to `main`. | [docs](docs/android-ci.md) | [caller](examples/android-ci.yml) |
+| [`flutter-ci.yml`](.github/workflows/flutter-ci.yml) | Checks formatting, runs `flutter analyze` and the tests, and builds the debug APK or the web app (uploaded as an artifact). Flutter version from FVM or `pubspec.yaml`; runs `build_runner` when the project uses it. | [docs](docs/flutter-ci.md) | [caller](examples/flutter-ci.yml) |
 
 ### Repo settings each workflow needs
 
@@ -65,6 +66,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `node-ci.yml` | A committed lockfile | — | — |
 | `dotnet-ci.yml` | Nothing | — | — |
 | `android-ci.yml` | A committed Gradle wrapper (`gradlew`). For the dependency submission job: **Dependency graph** enabled (without it, that job only warns) | Free | Free |
+| `flutter-ci.yml` | Nothing. Recommended: Flutter pinned with FVM (`.fvmrc`) and `pubspec.lock` committed | — | — |
 
 Recommended, though no workflow depends on them:
 
