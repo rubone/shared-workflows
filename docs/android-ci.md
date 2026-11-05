@@ -9,7 +9,7 @@ Workflow that checks every PR and push of an Android app or library built with G
 | **Unit tests** | `testDebugUnitTest` | Tests in `src/test/`, on the JVM (no emulator) |
 | **Build APK** | `assembleDebug` | The app compiles and packages; the APK is uploaded as an artifact |
 
-On pushes to `main`, a second job sends the resolved Gradle dependencies to GitHub's
+On pushes to `main` (and manual or scheduled runs on it), a second job sends the resolved Gradle dependencies to GitHub's
 dependency graph (see [Dependency graph](#dependency-graph)).
 
 - Workflow: [`.github/workflows/android-ci.yml`](../.github/workflows/android-ci.yml)
@@ -17,7 +17,7 @@ dependency graph (see [Dependency graph](#dependency-graph)).
 - Actions: `actions/setup-java` v6.1.0, `gradle/actions` v6.4.0 (`setup-gradle` and
   `dependency-submission`) and `actions/upload-artifact` v7.0.2, pinned by commit SHA
 - Repo access: `contents: read` for the build; `contents: write` only for the dependency graph
-  job, on pushes to `main`. No secrets.
+  job, on `main` only. No secrets.
 
 ---
 
@@ -93,7 +93,7 @@ GitHub rejects the whole workflow if a nested job asks for more than the caller 
 | `VARIANT` | `variant` | `debug` | Variant for the tasks: build type, or flavor + build type in camelCase. |
 | `STEPS` | `steps` | `lint,test,assemble` | Steps to run, comma-separated. |
 | `APK_RETENTION_DAYS` | `apk_retention_days` (number) | `7` | Days to keep the APK artifact (1–90). |
-| `SUBMIT_DEPENDENCIES` | `submit_dependencies` | `'true'` | Submit Gradle dependencies to the dependency graph on pushes to `main`. |
+| `SUBMIT_DEPENDENCIES` | `submit_dependencies` | `'true'` | Submit Gradle dependencies to the dependency graph on pushes, manual and scheduled runs on `main`. |
 | `GRADLE_CACHE_PROVIDER` | — | `basic` | Gradle cache: `basic` or `enhanced` (see [Gradle cache](#gradle-cache)). |
 
 In call mode, an empty input (or `0` for the number) falls back to the `env` value.
@@ -168,8 +168,10 @@ in a PR is flagged by Dependabot after merging, not by the review before it. Sub
 too needs a write token while building the PR's code, which is only safe with a separate
 `workflow_run` workflow (see extensions).
 
-The job runs only on pushes to the default branch, so the write token never runs code from a
-PR.
+The job runs only on the default branch, for `push`, `workflow_dispatch` and `schedule` events,
+so the write token never runs code from a PR. To submit without a new commit (for example, after
+enabling the dependency graph), add `workflow_dispatch:` to `on:` and run the workflow on
+`main` from the **Actions** tab.
 
 ---
 

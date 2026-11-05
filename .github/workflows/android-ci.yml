@@ -8,7 +8,7 @@
 # Without gradlew or an Android plugin, it skips with a warning (run stays green). Flutter
 # projects are skipped too: use flutter-ci.yml.
 #
-# On pushes to the default branch, a second job submits the resolved Gradle dependencies to
+# On pushes (and manual or scheduled runs) on the default branch, a second job submits the resolved Gradle dependencies to
 # the dependency graph, so Dependabot alerts and dependency review cover them (GitHub can't
 # read Gradle dependencies from the build files alone).
 #
@@ -66,7 +66,7 @@ on:
         required: false
         default: 0
       submit_dependencies:
-        description: "'true' or 'false': submit Gradle dependencies to the dependency graph on pushes to the default branch. Overrides env.SUBMIT_DEPENDENCIES."
+        description: "'true' or 'false': submit Gradle dependencies to the dependency graph on pushes and manual or scheduled runs on the default branch. Overrides env.SUBMIT_DEPENDENCIES."
         type: string
         required: false
         default: ''
@@ -87,8 +87,8 @@ env:
   STEPS: 'lint,test,assemble'
   # Days to keep the APK artifact (1-90).
   APK_RETENTION_DAYS: '7'
-  # 'true' = on pushes to the default branch, submit the Gradle dependencies to the
-  # dependency graph (needs it enabled in Settings → Advanced Security).
+  # 'true' = on pushes and manual or scheduled runs on the default branch, submit the Gradle
+  # dependencies to the dependency graph (needs it enabled in Settings → Advanced Security).
   SUBMIT_DEPENDENCIES: 'true'
   # Gradle cache: 'basic' (open source, free everywhere) or 'enhanced' (Gradle's
   # proprietary cache: free for public repos, a free preview for private ones).
@@ -300,14 +300,15 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Submits the resolved Gradle dependencies to the dependency graph. Runs only on pushes to
-  # the default branch (trusted code), so it can use a write token.
+  # Submits the resolved Gradle dependencies to the dependency graph. Runs only on pushes,
+  # manual runs and scheduled runs on the default branch (trusted code, never a PR's), so it
+  # can use a write token. In call mode, github.event_name is the caller's event.
   dependency-graph:
     name: Submit Gradle dependencies
     needs: ci
     if: >-
       needs.ci.outputs.found == 'true' && needs.ci.outputs.submit == 'true'
-      && github.event_name == 'push'
+      && contains(fromJSON('["push", "workflow_dispatch", "schedule"]'), github.event_name)
       && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 20
