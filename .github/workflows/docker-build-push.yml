@@ -1,0 +1,507 @@
+# Docker build and push: builds the image with Buildx and pushes it to GitHub Container
+# Registry (GHCR) or Azure Container Registry (ACR), tagged by commit SHA, branch and semver.
+#
+#   - Pull requests: build only, to check the Dockerfile. Nothing is pushed.
+#   - Pushes to the default branch: push, tagged sha-<short sha> and the branch name.
+#   - Tags v1.2.3: push, tagged 1.2.3, 1.2, 1 and latest.
+# Without a Dockerfile, it skips with a warning (run stays green).
+#
+# One platform by default (linux/amd64). With PLATFORMS: 'linux/amd64,linux/arm64', each
+# platform builds in parallel (arm64 on a native ARM runner in public repos) and the results
+# are merged into one multi-platform image.
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The pull_request / push triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        docker:
+#          permissions: { contents: read, packages: write, id-token: write }
+#          uses: rubone/shared-workflows/.github/workflows/docker-build-push.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#      Outputs: image, digest, tags (for a later deploy or scan job).
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/docker-build-push.md
+name: Docker build and push
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      context:
+        description: "Build context folder, relative to the repo root. Overrides env.CONTEXT."
+        type: string
+        required: false
+        default: ''
+      dockerfile:
+        description: "Dockerfile path, relative to the repo root. Empty = <context>/Dockerfile. Overrides env.DOCKERFILE."
+        type: string
+        required: false
+        default: ''
+      registry:
+        description: "'ghcr' or 'acr'. Overrides env.REGISTRY."
+        type: string
+        required: false
+        default: ''
+      image_name:
+        description: "Image name without registry or tag. Empty = the repo name. Overrides env.IMAGE_NAME."
+        type: string
+        required: false
+        default: ''
+      platforms:
+        description: "Comma-separated platforms (e.g. 'linux/amd64,linux/arm64'). Overrides env.PLATFORMS."
+        type: string
+        required: false
+        default: ''
+      build_args:
+        description: "Build arguments, one KEY=value per line. Overrides env.BUILD_ARGS."
+        type: string
+        required: false
+        default: ''
+      target:
+        description: "Dockerfile stage to build. Overrides env.TARGET."
+        type: string
+        required: false
+        default: ''
+      push:
+        description: "'auto' (default branch and v* tags, never PRs) or 'false'. Overrides env.PUSH."
+        type: string
+        required: false
+        default: ''
+      arm_runner:
+        description: "Runner for linux/arm64: 'auto', 'qemu' or a runner label. Overrides env.ARM_RUNNER."
+        type: string
+        required: false
+        default: ''
+      acr_name:
+        description: "ACR name (myregistry, without .azurecr.io). Overrides env.ACR_NAME."
+        type: string
+        required: false
+        default: ''
+      azure_client_id:
+        description: "ACR only: client ID of the Entra app or managed identity with a federated credential. Overrides env.AZURE_CLIENT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_tenant_id:
+        description: "ACR only: Entra tenant ID. Overrides env.AZURE_TENANT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_subscription_id:
+        description: "ACR only: subscription ID. Overrides env.AZURE_SUBSCRIPTION_ID."
+        type: string
+        required: false
+        default: ''
+    outputs:
+      image:
+        description: "Image name with registry, without tag (e.g. ghcr.io/org/app). Empty if not pushed."
+        value: ${{ jobs.merge.outputs.image }}
+      digest:
+        description: "Digest of the pushed image (sha256:...). Empty if not pushed."
+        value: ${{ jobs.merge.outputs.digest }}
+      tags:
+        description: "Pushed tags, comma-separated (full references). Empty if not pushed."
+        value: ${{ jobs.merge.outputs.tags }}
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Build context folder, relative to the repo root ('.' = root).
+  CONTEXT: '.'
+  # Dockerfile path, relative to the repo root. Empty = <CONTEXT>/Dockerfile.
+  DOCKERFILE: ''
+  # Registry: 'ghcr' (GitHub Container Registry, uses GITHUB_TOKEN, no secrets) or 'acr'
+  # (Azure Container Registry, signs in with OIDC: set ACR_NAME and the AZURE_* values).
+  REGISTRY: 'ghcr'
+  # Image name without registry or tag. Empty = the repo name (ghcr.io/<owner>/<repo>, or
+  # <acr>.azurecr.io/<repo>).
+  IMAGE_NAME: ''
+  # Platforms, comma-separated: 'linux/amd64', or 'linux/amd64,linux/arm64' (multi-platform).
+  PLATFORMS: 'linux/amd64'
+  # Build arguments, one KEY=value per line (not for secrets: they stay in the image).
+  BUILD_ARGS: ''
+  # Dockerfile stage to build (multi-stage builds). Empty = the last stage.
+  TARGET: ''
+  # 'auto' = push on the default branch and on v* tags, build only on PRs; 'false' = never push.
+  PUSH: 'auto'
+  # Runner for linux/arm64: 'auto' = native ARM runner (ubuntu-24.04-arm) in public repos,
+  # QEMU emulation in private ones; 'qemu'; or a runner label.
+  ARM_RUNNER: 'auto'
+  # ACR only. AZURE_* come from repository variables (Settings → Secrets and variables →
+  # Actions → Variables); they're IDs, not secrets.
+  ACR_NAME: ''
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  prepare:
+    name: Prepare image
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      found: ${{ steps.detect.outputs.found }}
+      push: ${{ steps.detect.outputs.push }}
+      registry: ${{ steps.detect.outputs.registry }}
+      acr_name: ${{ steps.detect.outputs.acr_name }}
+      image: ${{ steps.detect.outputs.image }}
+      context: ${{ steps.detect.outputs.context }}
+      file: ${{ steps.detect.outputs.file }}
+      slug: ${{ steps.detect.outputs.slug }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+      build_args: ${{ steps.detect.outputs.build_args }}
+      target: ${{ steps.detect.outputs.target }}
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+      annotations: ${{ steps.meta.outputs.annotations }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect Dockerfile
+        id: detect
+        env:
+          CONTEXT: ${{ inputs.context || env.CONTEXT }}
+          DOCKERFILE: ${{ inputs.dockerfile || env.DOCKERFILE }}
+          REGISTRY: ${{ inputs.registry || env.REGISTRY }}
+          IMAGE_NAME: ${{ inputs.image_name || env.IMAGE_NAME }}
+          PLATFORMS: ${{ inputs.platforms || env.PLATFORMS }}
+          BUILD_ARGS: ${{ inputs.build_args || env.BUILD_ARGS }}
+          TARGET: ${{ inputs.target || env.TARGET }}
+          PUSH: ${{ inputs.push || env.PUSH }}
+          ARM_RUNNER: ${{ inputs.arm_runner || env.ARM_RUNNER }}
+          ACR_NAME: ${{ inputs.acr_name || env.ACR_NAME }}
+          AZURE_CLIENT_ID: ${{ inputs.azure_client_id || env.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ inputs.azure_tenant_id || env.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id || env.AZURE_SUBSCRIPTION_ID }}
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PRIVATE_REPO: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+
+          # Normalizes a repo-relative path into $p, or fails.
+          relpath() {
+            p="${1%/}"; p="${p#./}"; p="${p:-.}"
+            if [[ "${p}" == /* || "/${p}/" == */../* ]]; then
+              echo "::error::$2 must be a path inside the repo, relative to its root. Got: '$1'."
+              exit 1
+            fi
+          }
+          relpath "${CONTEXT}" CONTEXT; ctx="${p}"
+          file="${ctx}/Dockerfile"
+          if [ -n "${DOCKERFILE}" ]; then relpath "${DOCKERFILE}" DOCKERFILE; file="${p}"; fi
+
+          case "${REGISTRY}" in ghcr|acr) ;; *)
+            echo "::error::REGISTRY must be 'ghcr' or 'acr'. Got: '${REGISTRY}'."; exit 1 ;;
+          esac
+          case "${PUSH}" in auto|false) ;; *)
+            echo "::error::PUSH must be 'auto' or 'false'. Got: '${PUSH}'."; exit 1 ;;
+          esac
+
+          if [ ! -f "${file}" ]; then
+            echo "::warning::No Dockerfile at '${file}'; skipping the Docker build. If it's elsewhere, set CONTEXT or DOCKERFILE."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Image reference: <registry host>/<name>, lowercase (registries require it).
+          repo="${GITHUB_REPOSITORY,,}"
+          name="${IMAGE_NAME,,}"
+          if [ "${REGISTRY}" = ghcr ]; then
+            host=ghcr.io
+            if [ -z "${name}" ]; then name="${repo}"; elif [[ "${name}" != */* ]]; then name="${repo%%/*}/${name}"; fi
+          else
+            acr="${ACR_NAME,,}"; acr="${acr%.azurecr.io}"
+            if ! [[ "${acr}" =~ ^[a-z0-9]{5,50}$ ]]; then
+              echo "::error::REGISTRY is 'acr': set ACR_NAME to the registry name (5-50 letters and digits, without .azurecr.io). Got: '${ACR_NAME}'."
+              exit 1
+            fi
+            host="${acr}.azurecr.io"
+            name="${name:-${repo#*/}}"
+          fi
+          if ! [[ "${name}" =~ ^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$ ]]; then
+            echo "::error::'${name}' isn't a valid image name (lowercase letters, digits, '.', '_', '-' and '/')."
+            exit 1
+          fi
+          image="${host}/${name}"
+
+          # Push on the default branch and on v* tags, never on pull requests.
+          do_push=false
+          if [ "${PUSH}" = auto ] && [[ "${EVENT}" != pull_request* ]] \
+             && { [ "${GITHUB_REF}" = "refs/heads/${DEFAULT_BRANCH}" ] || [[ "${GITHUB_REF}" == refs/tags/v* ]]; }; then
+            do_push=true
+          fi
+          if [ "${do_push}" = true ] && [ "${REGISTRY}" = acr ]; then
+            missing=()
+            [ -n "${AZURE_CLIENT_ID}" ] || missing+=(AZURE_CLIENT_ID)
+            [ -n "${AZURE_TENANT_ID}" ] || missing+=(AZURE_TENANT_ID)
+            [ -n "${AZURE_SUBSCRIPTION_ID}" ] || missing+=(AZURE_SUBSCRIPTION_ID)
+            if [ "${#missing[@]}" -gt 0 ]; then
+              echo "::error::REGISTRY is 'acr' but these values are missing: ${missing[*]}. Add them as repository variables (Settings → Secrets and variables → Actions → Variables)."
+              exit 1
+            fi
+          fi
+
+          # One build job per platform: amd64 on ubuntu-latest, arm64 on an ARM runner or
+          # emulated with QEMU, anything else emulated.
+          arm="${ARM_RUNNER}"
+          if [ "${arm}" = auto ]; then
+            arm=ubuntu-24.04-arm
+            [ "${PRIVATE_REPO}" = true ] && arm=qemu
+          fi
+          matrix='[]'
+          for p in ${PLATFORMS//,/ }; do
+            if ! [[ "${p}" =~ ^linux/[a-z0-9]+(/v[0-9]+)?$ ]]; then
+              echo "::error::'${p}' isn't a valid platform (e.g. linux/amd64, linux/arm64)."; exit 1
+            fi
+            runner=ubuntu-latest; qemu=false
+            if [ "${p}" = linux/arm64 ] && [ "${arm}" != qemu ]; then
+              runner="${arm}"
+            elif [ "${p}" != linux/amd64 ]; then
+              qemu=true
+            fi
+            matrix=$(jq -c --arg p "${p}" --arg r "${runner}" --argjson q "${qemu}" --arg s "${p//\//-}" \
+              '. + [{platform: $p, runner: $r, qemu: $q, slug: $s}]' <<< "${matrix}")
+          done
+          if [ "${matrix}" = '[]' ]; then
+            echo "::error::PLATFORMS is empty."; exit 1
+          fi
+
+          {
+            echo "found=true"
+            echo "push=${do_push}"
+            echo "registry=${REGISTRY}"
+            echo "acr_name=${acr:-}"
+            echo "image=${image}"
+            echo "context=${ctx}"
+            echo "file=${file}"
+            echo "slug=$(printf '%s' "${ctx}" | tr -c 'A-Za-z0-9._-' '-')"
+            echo "matrix=${matrix}"
+            echo "target=${TARGET}"
+            echo "build_args<<BUILD_ARGS_EOF"
+            printf '%s\n' "${BUILD_ARGS}"
+            echo "BUILD_ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Image: ${image} | Dockerfile: ${file} | platforms: ${PLATFORMS} | push: ${do_push}"
+          jq -r '.[] | "  \(.platform) on \(.runner)\(if .qemu then " (QEMU)" else "" end)"' <<< "${matrix}"
+
+      - name: Image tags and labels
+        id: meta
+        if: steps.detect.outputs.found == 'true'
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          # Annotations for the multi-platform index (GHCR reads the description and the
+          # linked repo from them).
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
+        with:
+          images: ${{ steps.detect.outputs.image }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: prepare
+    if: needs.prepare.outputs.found == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write   # push to GHCR
+      id-token: write   # sign in to Azure with OIDC (ACR only)
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    # A new push to the same PR cancels the previous run.
+    concurrency:
+      group: docker-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ needs.prepare.outputs.slug }}-${{ matrix.slug }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        if: matrix.qemu
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Sign in to GHCR
+        if: needs.prepare.outputs.push == 'true' && needs.prepare.outputs.registry == 'ghcr'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign in to Azure
+        if: needs.prepare.outputs.push == 'true' && needs.prepare.outputs.registry == 'acr'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ inputs.azure_client_id || env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ inputs.azure_tenant_id || env.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign in to ACR
+        if: needs.prepare.outputs.push == 'true' && needs.prepare.outputs.registry == 'acr'
+        env:
+          ACR: ${{ needs.prepare.outputs.acr_name }}
+        run: az acr login --name "${ACR}"
+
+      # Pull requests: build only (the output is the cache). Pushes: push the platform image
+      # by digest; the merge job tags it.
+      - name: Build
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ needs.prepare.outputs.context }}
+          file: ${{ needs.prepare.outputs.file }}
+          platforms: ${{ matrix.platform }}
+          target: ${{ needs.prepare.outputs.target }}
+          build-args: ${{ needs.prepare.outputs.build_args }}
+          labels: ${{ needs.prepare.outputs.labels }}
+          outputs: ${{ needs.prepare.outputs.push == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', needs.prepare.outputs.image) || 'type=cacheonly' }}
+          sbom: ${{ needs.prepare.outputs.push == 'true' }}
+          cache-from: type=gha,scope=docker-${{ needs.prepare.outputs.slug }}-${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=docker-${{ needs.prepare.outputs.slug }}-${{ matrix.slug }}
+
+      - name: Save digest
+        if: needs.prepare.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: needs.prepare.outputs.push == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ needs.prepare.outputs.slug }}-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Summary
+        if: always() && needs.prepare.outputs.push != 'true'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          case "${OUTCOME}" in success) icon="✅" ;; failure) icon="❌" ;; *) icon="—" ;; esac
+          echo "${icon} \`${IMAGE}\` (${PLATFORM}): build ${OUTCOME:-not reached}, not pushed." >> "$GITHUB_STEP_SUMMARY"
+
+  merge:
+    name: Push image
+    needs: [prepare, build]
+    if: needs.prepare.outputs.push == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write   # push to GHCR
+      id-token: write   # sign in to Azure with OIDC (ACR only)
+    outputs:
+      image: ${{ needs.prepare.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+      tags: ${{ steps.push.outputs.tags }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ needs.prepare.outputs.slug }}-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Sign in to GHCR
+        if: needs.prepare.outputs.registry == 'ghcr'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign in to Azure
+        if: needs.prepare.outputs.registry == 'acr'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ inputs.azure_client_id || env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ inputs.azure_tenant_id || env.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign in to ACR
+        if: needs.prepare.outputs.registry == 'acr'
+        env:
+          ACR: ${{ needs.prepare.outputs.acr_name }}
+        run: az acr login --name "${ACR}"
+
+      # Creates the image index from the platform images and applies the tags.
+      - name: Tag and push
+        id: push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          TAGS: ${{ needs.prepare.outputs.tags }}
+          ANNOTATIONS: ${{ needs.prepare.outputs.annotations }}
+          PLATFORMS: ${{ join(fromJSON(needs.prepare.outputs.matrix).*.platform, ', ') }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r t; do [ -n "${t}" ] && args+=(--tag "${t}"); done <<< "${TAGS}"
+          while IFS= read -r a; do [ -n "${a}" ] && args+=(--annotation "${a}"); done <<< "${ANNOTATIONS}"
+          sources=()
+          for d in *; do sources+=("${IMAGE}@sha256:${d}"); done
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
+
+          first_tag=$(head -n 1 <<< "${TAGS}")
+          digest=$(docker buildx imagetools inspect "${first_tag}" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "tags=$(paste -sd, - <<< "${TAGS}")" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Docker image: \`${IMAGE}\`"
+            echo
+            echo "Digest: \`${digest}\`"
+            echo
+            echo "Platforms: ${PLATFORMS}"
+            echo
+            echo "Tags:"
+            while IFS= read -r t; do [ -n "${t}" ] && echo "- \`${t}\`"; done <<< "${TAGS}"
+            echo
+            echo "Pull it with:"
+            echo
+            echo '```'
+            echo "docker pull ${IMAGE}@${digest}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -6,6 +6,16 @@ changes to inputs, secrets or behavior require a new major version.
 
 ## [Unreleased]
 
+### Added
+- `docker-build-push.yml`: builds a Docker image with Buildx (GitHub Actions layer cache) and
+  pushes it to GHCR (`GITHUB_TOKEN`) or ACR (Azure OIDC with `azure/login` v3.1.0). PRs only
+  build; pushes to the default branch are tagged `sha-<short>` and the branch, `v*` tags get
+  semver tags and `latest`. Optional multi-platform builds, with arm64 on a native ARM runner
+  in public repos and QEMU otherwise, merged into one image. SBOM and provenance
+  attestations. Outputs the image, digest and tags. Skips with a warning without a
+  Dockerfile. Uses the `docker/*` actions pinned by SHA. Copy and call modes.
+- `tests/fixtures/docker`: multi-platform sample image for the self-test.
+
 ## [1.0.0] - 2026-11-05
 
 ### Changed
