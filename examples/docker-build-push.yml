@@ -1,0 +1,37 @@
+# Call mode: copy to .github/workflows/docker-build-push.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy .github/workflows/docker-build-push.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/docker-build-push.md
+name: Docker build and push
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions: {}
+
+jobs:
+  docker:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      contents: read
+      packages: write   # push to GHCR
+      id-token: write   # sign in to Azure with OIDC (ACR only; harmless otherwise)
+    uses: rubone/shared-workflows/.github/workflows/docker-build-push.yml@v1
+    with:
+      context: '.'                     # folder with the Dockerfile
+      registry: 'ghcr'                 # or 'acr'
+      platforms: 'linux/amd64'         # or 'linux/amd64,linux/arm64'
+      # ACR only (repository variables, not secrets):
+      # acr_name: 'myregistry'
+      # azure_client_id: ${{ vars.AZURE_CLIENT_ID }}
+      # azure_tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      # azure_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+  # Use the pushed image in a later job: needs.docker.outputs.image, .digest, .tags
+  # (empty on pull requests, where nothing is pushed).

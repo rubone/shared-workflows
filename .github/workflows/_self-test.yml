@@ -176,3 +176,28 @@ jobs:
       working_directory: ${{ matrix.project }}
       build_target: ${{ matrix.build_target }}
       artifact_retention_days: 1
+
+  # Smoke test of call mode on tests/fixtures/docker, for amd64 and arm64 (native ARM runner,
+  # since this repo is public), plus the repo root, which has no Dockerfile and must skip
+  # with a warning. PRs only build; nothing is pushed. The nested jobs ask for packages and
+  # id-token write, so the caller must grant them.
+  docker-build-push:
+    name: Docker (smoke test, ${{ matrix.context }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        context:
+          - tests/fixtures/docker
+          - .
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/docker-build-push.yml
+    with:
+      context: ${{ matrix.context }}
+      image_name: shared-workflows-fixture
+      platforms: linux/amd64,linux/arm64
+      build_args: |
+        GREETING=Hello from the self-test
