@@ -49,6 +49,7 @@ shared-workflows/
 | [`dotnet-ci.yml`](.github/workflows/dotnet-ci.yml) | Restores with cache, checks formatting (with `.editorconfig`), builds and runs the tests of a .NET solution. SDK from `global.json`. | [docs](docs/dotnet-ci.md) | [caller](examples/dotnet-ci.yml) |
 | [`android-ci.yml`](.github/workflows/android-ci.yml) | Android Lint, unit tests and the debug APK (uploaded as an artifact), with Gradle caching. Variant configurable for flavors. Submits the Gradle dependencies to the dependency graph on pushes to `main`. | [docs](docs/android-ci.md) | [caller](examples/android-ci.yml) |
 | [`flutter-ci.yml`](.github/workflows/flutter-ci.yml) | Checks formatting, runs `flutter analyze` and the tests, and builds the debug APK or the web app (uploaded as an artifact). Flutter version from FVM or `pubspec.yaml`; runs `build_runner` when the project uses it. | [docs](docs/flutter-ci.md) | [caller](examples/flutter-ci.yml) |
+| [`php-laravel-ci.yml`](.github/workflows/php-laravel-ci.yml) | Installs with Composer cache and runs a Laravel app's tests (Pest or PHPUnit) on SQLite, MySQL, MariaDB or PostgreSQL. Optional Pint, PHPStan/Larastan and Vite build. PHP version from `composer.json` and `composer.lock`. | [docs](docs/php-laravel-ci.md) | [caller](examples/php-laravel-ci.yml) |
 | [`docker-build-push.yml`](.github/workflows/docker-build-push.yml) | Builds the Docker image with Buildx and cache, and pushes it to GHCR or ACR (OIDC, no passwords) tagged by commit, branch and semver. PRs only build. Optional multi-platform (amd64 + arm64). | [docs](docs/docker-build-push.md) | [caller](examples/docker-build-push.yml) |
 
 ### Repo settings each workflow needs
@@ -68,6 +69,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `dotnet-ci.yml` | Nothing | — | — |
 | `android-ci.yml` | A committed Gradle wrapper (`gradlew`). For the dependency submission job: **Dependency graph** enabled (without it, that job only warns) | Free | Free |
 | `flutter-ci.yml` | Nothing. Recommended: Flutter pinned with FVM (`.fvmrc`) and `pubspec.lock` committed | — | — |
+| `php-laravel-ci.yml` | Nothing. Recommended: `composer.lock` committed | — | — |
 | `docker-build-push.yml` | GHCR: nothing. ACR: an identity with AcrPush and a federated credential, and the `AZURE_*` repository variables | GHCR free | GHCR: free quota, then billed storage |
 
 Recommended, though no workflow depends on them:

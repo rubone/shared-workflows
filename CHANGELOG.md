@@ -15,6 +15,14 @@ changes to inputs, secrets or behavior require a new major version.
   attestations. Outputs the image, digest and tags. Skips with a warning without a
   Dockerfile. Uses the `docker/*` actions pinned by SHA. Copy and call modes.
 - `tests/fixtures/docker`: multi-platform sample image for the self-test.
+- `php-laravel-ci.yml`: installs a Laravel app's Composer dependencies with cache and runs its
+  tests (`php artisan test`, Pest or PHPUnit) on SQLite in memory, or on MySQL, MariaDB or
+  PostgreSQL in a container. Optional steps: Pint format check, PHPStan/Larastan, and the
+  Vite build (npm, pnpm or Yarn). PHP version from `PHP_VERSION`, `config.platform.php`, or
+  the lowest version `composer.json` and every package in `composer.lock` accept; PHP
+  extensions from their `ext-*` requirements. Skips with a warning without a Laravel
+  `composer.json`. Uses `shivammathur/setup-php` 2.40.0 pinned by SHA. Copy and call modes.
+- `tests/fixtures/laravel`: Laravel 13 app (PHPUnit, Pint, Larastan, Vite) for the self-test.
 
 ## [1.0.0] - 2026-11-05
 

@@ -177,6 +177,29 @@ jobs:
       build_target: ${{ matrix.build_target }}
       artifact_retention_days: 1
 
+  # Smoke test of call mode on tests/fixtures/laravel (Laravel 13 skeleton, PHPUnit, Pint,
+  # Larastan, Vite): every step on SQLite, and the tests on each database server; plus the
+  # repo root, which has no composer.json and must skip with a warning.
+  php-laravel-ci:
+    name: Laravel CI (smoke test, ${{ matrix.project }}, ${{ matrix.db }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { project: tests/fixtures/laravel, db: sqlite, steps: 'format,analyze,assets,test' }
+          - { project: tests/fixtures/laravel, db: mysql, steps: test }
+          - { project: tests/fixtures/laravel, db: mariadb, steps: test }
+          - { project: tests/fixtures/laravel, db: pgsql, steps: test }
+          - { project: ., db: sqlite, steps: test }
+    permissions:
+      contents: read
+    uses: ./.github/workflows/php-laravel-ci.yml
+    with:
+      working_directory: ${{ matrix.project }}
+      db_connection: ${{ matrix.db }}
+      steps: ${{ matrix.steps }}
+
   # Smoke test of call mode on tests/fixtures/docker, for amd64 and arm64 (native ARM runner,
   # since this repo is public), plus the repo root, which has no Dockerfile and must skip
   # with a warning. PRs only build; nothing is pushed. The nested jobs ask for packages and
