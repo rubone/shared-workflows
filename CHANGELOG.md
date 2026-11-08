@@ -23,6 +23,15 @@ changes to inputs, secrets or behavior require a new major version.
   extensions from their `ext-*` requirements. Skips with a warning without a Laravel
   `composer.json`. Uses `shivammathur/setup-php` 2.40.0 pinned by SHA. Copy and call modes.
 - `tests/fixtures/laravel`: Laravel 13 app (PHPUnit, Pint, Larastan, Vite) for the self-test.
+- `trivy-scan.yml`: scans a Docker image for vulnerabilities with the Trivy CLI 0.76.1
+  (pinned by checksum, not `aquasecurity/trivy-action`, whose tags were hijacked in March
+  2026). PRs build the image from the Dockerfile with docker-build-push's layer cache; after
+  docker-build-push pushes (`workflow_run`), it scans the pushed `sha-<commit>` tag; weekly
+  and manual runs scan `latest`, else the default branch's tag. Fails on CRITICAL/HIGH
+  vulnerabilities with a fixed version (configurable, or report only), uploads SARIF to code
+  scanning when available, and summarizes the findings in the job. Honors `.trivyignore`.
+  Outputs the counts. Copy and call modes.
+- `docker-build-push` docs link to `trivy-scan`.
 
 ## [1.0.0] - 2026-11-05
 

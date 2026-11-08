@@ -51,6 +51,7 @@ shared-workflows/
 | [`flutter-ci.yml`](.github/workflows/flutter-ci.yml) | Checks formatting, runs `flutter analyze` and the tests, and builds the debug APK or the web app (uploaded as an artifact). Flutter version from FVM or `pubspec.yaml`; runs `build_runner` when the project uses it. | [docs](docs/flutter-ci.md) | [caller](examples/flutter-ci.yml) |
 | [`php-laravel-ci.yml`](.github/workflows/php-laravel-ci.yml) | Installs with Composer cache and runs a Laravel app's tests (Pest or PHPUnit) on SQLite, MySQL, MariaDB or PostgreSQL. Optional Pint, PHPStan/Larastan and Vite build. PHP version from `composer.json` and `composer.lock`. | [docs](docs/php-laravel-ci.md) | [caller](examples/php-laravel-ci.yml) |
 | [`docker-build-push.yml`](.github/workflows/docker-build-push.yml) | Builds the Docker image with Buildx and cache, and pushes it to GHCR or ACR (OIDC, no passwords) tagged by commit, branch and semver. PRs only build. Optional multi-platform (amd64 + arm64). | [docs](docs/docker-build-push.md) | [caller](examples/docker-build-push.yml) |
+| [`trivy-scan.yml`](.github/workflows/trivy-scan.yml) | Scans the Docker image for known vulnerabilities with Trivy: on PRs (built from the Dockerfile), after each push and weekly. Fails on CRITICAL/HIGH ones with a fix; results in the Security tab. | [docs](docs/trivy-scan.md) | [caller](examples/trivy-scan.yml) |
 
 ### Repo settings each workflow needs
 
@@ -71,6 +72,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `flutter-ci.yml` | Nothing. Recommended: Flutter pinned with FVM (`.fvmrc`) and `pubspec.lock` committed | — | — |
 | `php-laravel-ci.yml` | Nothing. Recommended: `composer.lock` committed | — | — |
 | `docker-build-push.yml` | GHCR: nothing. ACR: an identity with AcrPush and a federated credential, and the `AZURE_*` repository variables | GHCR free | GHCR: free quota, then billed storage |
+| `trivy-scan.yml` | The image published by `docker-build-push.yml` (same values in both). For the Security tab: **Code scanning** available. ACR: AcrPull and the `AZURE_*` variables | Free | Security tab needs GitHub Code Security; without it, job summary only |
 
 Recommended, though no workflow depends on them:
 
