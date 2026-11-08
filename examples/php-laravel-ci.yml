@@ -1,0 +1,27 @@
+# Call mode: copy to .github/workflows/php-laravel-ci.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy .github/workflows/php-laravel-ci.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/php-laravel-ci.md
+name: Laravel CI
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  laravel-ci:
+    permissions:
+      contents: read
+    uses: rubone/shared-workflows/.github/workflows/php-laravel-ci.yml@v1
+    with:
+      working_directory: '.'                  # folder with composer.json and artisan
+      php_version: ''                         # empty = from composer.json and composer.lock
+      php_extensions: ''                      # extra extensions, e.g. 'redis, imagick'
+      steps: 'test'                           # add format, analyze, assets as needed
+      db_connection: 'sqlite'                 # or mysql, mariadb, pgsql
+      db_version: ''                          # empty = mysql 8.4, mariadb 11.8, postgres 18

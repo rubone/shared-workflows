@@ -1,0 +1,499 @@
+# Laravel CI: installs Composer dependencies with cache and runs the app's tests (Pest or
+# PHPUnit) against SQLite, MySQL, MariaDB or PostgreSQL. Optional steps check the
+# formatting (Pint), run static analysis (PHPStan/Larastan) and build the Vite assets.
+#
+# Detected from the project, nothing to set in most repos:
+#   - A Laravel app: composer.json requiring laravel/framework, plus artisan.
+#   - PHP version: PHP_VERSION, else config.platform.php in composer.json, else the
+#     lowest version that composer.json and every package in composer.lock accept,
+#     else the latest stable.
+#   - PHP extensions: the ext-* requirements of composer.json and composer.lock.
+#   - Test runner: `php artisan test` (Collision), else Pest, else PHPUnit.
+#   - Each optional step runs only if its tool is installed (no laravel/pint in
+#     composer.lock, no format check).
+# Without a Laravel composer.json, it skips with a warning (run stays green).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The pull_request / push triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        laravel-ci:
+#          permissions: { contents: read }
+#          uses: rubone/shared-workflows/.github/workflows/php-laravel-ci.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/php-laravel-ci.md
+name: Laravel CI
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder with the app's composer.json, relative to the repo root. Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      php_version:
+        description: "PHP version (e.g. '8.4'). Empty = from composer.json and composer.lock. Overrides env.PHP_VERSION."
+        type: string
+        required: false
+        default: ''
+      php_extensions:
+        description: "Extra PHP extensions, comma-separated (e.g. 'redis, imagick'). Overrides env.PHP_EXTENSIONS."
+        type: string
+        required: false
+        default: ''
+      steps:
+        description: "Comma-separated steps to run: format, analyze, assets, test. Overrides env.STEPS."
+        type: string
+        required: false
+        default: ''
+      db_connection:
+        description: "Database for the tests: 'sqlite', 'mysql', 'mariadb' or 'pgsql'. Overrides env.DB_CONNECTION."
+        type: string
+        required: false
+        default: ''
+      db_version:
+        description: "Image tag of the database server (e.g. '8.4' for MySQL). Empty = the default per database. Overrides env.DB_VERSION."
+        type: string
+        required: false
+        default: ''
+      node_version:
+        description: "Node version for the assets step. Empty = from .nvmrc / .node-version, else the latest LTS. Overrides env.NODE_VERSION."
+        type: string
+        required: false
+        default: ''
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder with composer.json and artisan, relative to the repo root ('.' = root).
+  WORKING_DIRECTORY: '.'
+  # PHP version ('8.4'). Empty = config.platform.php in composer.json, else the lowest
+  # version composer.json and composer.lock accept, else the latest stable.
+  PHP_VERSION: ''
+  # Extensions beyond the ones Laravel and composer.json / composer.lock need,
+  # comma-separated ('redis, imagick').
+  PHP_EXTENSIONS: ''
+  # Steps to run, comma-separated:
+  #   format  vendor/bin/pint --test         (needs laravel/pint)
+  #   analyze vendor/bin/phpstan analyse     (needs phpstan.neon and PHPStan or Larastan)
+  #   assets  npm ci && npm run build        (Vite; needs a "build" script in package.json)
+  #   test    php artisan test, Pest or PHPUnit
+  STEPS: 'test'
+  # Database for the tests: 'sqlite' (in memory, no server), 'mysql', 'mariadb' or 'pgsql'
+  # (a server in a container on the runner). Overrides DB_CONNECTION from phpunit.xml and .env.
+  DB_CONNECTION: 'sqlite'
+  # Image tag of the database server. Empty = mysql:8.4, mariadb:11.8 or postgres:18.
+  DB_VERSION: ''
+  # Node version for the assets step. Empty = .nvmrc / .node-version, else the latest LTS.
+  NODE_VERSION: ''
+
+jobs:
+  ci:
+    name: Laravel build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # A new push to the same PR cancels the previous run.
+    concurrency:
+      group: laravel-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.working_directory }}-${{ inputs.db_connection }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect project
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          PHP_VERSION: ${{ inputs.php_version || env.PHP_VERSION }}
+          PHP_EXTENSIONS: ${{ inputs.php_extensions || env.PHP_EXTENSIONS }}
+          STEPS: ${{ inputs.steps || env.STEPS }}
+          DB_CONNECTION: ${{ inputs.db_connection || env.DB_CONNECTION }}
+          DB_VERSION: ${{ inputs.db_version || env.DB_VERSION }}
+          NODE_VERSION: ${{ inputs.node_version || env.NODE_VERSION }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"
+          dir="${dir#./}"
+          dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a folder inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          format=false; analyze=false; assets=false; test=false
+          for s in ${STEPS//,/ }; do
+            case "${s}" in
+              format|analyze|assets|test) printf -v "${s}" true ;;
+              *) echo "::error::Unknown step '${s}' in STEPS. Use: format, analyze, assets, test."; exit 1 ;;
+            esac
+          done
+
+          # Database server: image, port and credentials. SQLite runs in memory.
+          db_image=''; db_port=''; db_user=''; db_ext=pdo_sqlite
+          case "${DB_CONNECTION}" in
+            sqlite) ;;
+            mysql)   db_image="mysql:${DB_VERSION:-8.4}";      db_port=3306; db_user=root;     db_ext=pdo_mysql ;;
+            mariadb) db_image="mariadb:${DB_VERSION:-11.8}";   db_port=3306; db_user=root;     db_ext=pdo_mysql ;;
+            pgsql)   db_image="postgres:${DB_VERSION:-18}";    db_port=5432; db_user=postgres; db_ext=pdo_pgsql ;;
+            *) echo "::error::DB_CONNECTION must be 'sqlite', 'mysql', 'mariadb' or 'pgsql'. Got: '${DB_CONNECTION}'."; exit 1 ;;
+          esac
+
+          skip() {
+            echo "::warning::$1"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          composer="${dir}/composer.json"
+          [ -f "${composer}" ] || skip "No composer.json in '${dir}'; skipping Laravel CI. If the app is in a subfolder, set WORKING_DIRECTORY."
+          jq empty "${composer}" 2> /dev/null || { echo "::error::${composer} isn't valid JSON."; exit 1; }
+          if ! jq -e '.require["laravel/framework"]' "${composer}" > /dev/null || [ ! -f "${dir}/artisan" ]; then
+            skip "'${dir}' isn't a Laravel app (no laravel/framework in composer.json, or no artisan file); skipping Laravel CI."
+          fi
+
+          lock="${dir}/composer.lock"
+          if [ -f "${lock}" ]; then
+            jq empty "${lock}" 2> /dev/null || { echo "::error::${lock} isn't valid JSON."; exit 1; }
+          else
+            echo "::notice::No composer.lock in '${dir}': dependencies resolve to the newest allowed versions. Commit it, so CI installs the same versions as your machine."
+            lock=''
+          fi
+          # Every package of composer.lock (or nothing without one), as a JSON array.
+          packages() {
+            if [ -n "${lock}" ]; then jq -c '[.packages[]?, .["packages-dev"][]?]' "${lock}"; else echo '[]'; fi
+          }
+          # Is the package in composer.lock, or required in composer.json without a lock?
+          has() {
+            packages | jq -e --arg p "$1" 'any(.[]; .name == $p)' > /dev/null && return 0
+            [ -z "${lock}" ] && jq -e --arg p "$1" '(.require // {}) + (.["require-dev"] // {}) | has($p)' "${composer}" > /dev/null
+          }
+
+          # PHP version: setting, platform config, lowest version every requirement accepts.
+          php_ver="${PHP_VERSION}"; source="PHP_VERSION"
+          if [ -z "${php_ver}" ]; then
+            platform=$(jq -r '.config.platform.php // ""' "${composer}")
+            if [ -n "${platform}" ]; then
+              php_ver=$(grep -oE '^[0-9]+\.[0-9]+' <<< "${platform}" || true)
+              source="composer.json config.platform.php"
+            fi
+          fi
+          if [ -z "${php_ver}" ]; then
+            # The lower bound of each constraint ("^8.2", ">=8.4.1", "8.1 - 8.6"), as major.minor.
+            # The app can only install on the highest of them: e.g. composer.json says ^8.3
+            # but composer.lock has Symfony 8, which needs 8.4.
+            php_ver=$({
+              jq -r '.require.php // empty' "${composer}"
+              packages | jq -r '.[].require.php // empty'
+            } | while read -r c; do
+              v=$(grep -oE '[0-9]+(\.[0-9]+)?' <<< "${c}" | head -n 1 || true)
+              if [ -n "${v}" ]; then
+                [[ "${v}" == *.* ]] || v="${v}.0"
+                echo "${v}"
+              fi
+            done | sort -V | tail -n 1 || true)
+            source="lowest version composer.json and composer.lock accept"
+          fi
+          if [ -z "${php_ver}" ]; then
+            php_ver=latest; source="no version required"
+            echo "::notice::No PHP version in composer.json (require.php); using the latest stable. Set it there or in PHP_VERSION so a new PHP release can't break CI."
+          fi
+
+          # Extensions: Laravel's, the database driver's, ext-* from composer.json and
+          # composer.lock, and PHP_EXTENSIONS. setup-php skips the ones already installed.
+          extensions=$({
+            printf '%s\n' mbstring dom fileinfo tokenizer xml ctype curl "${db_ext}"
+            { jq -r '(.require // {}) | keys[]' "${composer}"; packages | jq -r '.[].require // {} | keys[]'; } \
+              | sed -n 's/^ext-//p' | tr '[:upper:]' '[:lower:]' | sed 's/^zend-opcache$/opcache/'
+            tr ',' '\n' <<< "${PHP_EXTENSIONS// /}"
+          } | grep -v '^$' | awk '!seen[$0]++' | paste -sd, -)
+
+          if [ "${format}" = true ] && ! has laravel/pint; then
+            echo "::notice::Format skipped: laravel/pint isn't installed. Add it with 'composer require --dev laravel/pint'."
+            format=false
+          fi
+          if [ "${analyze}" = true ]; then
+            phpstan_config=''
+            for f in phpstan.neon phpstan.neon.dist phpstan.dist.neon; do
+              if [ -f "${dir}/${f}" ]; then phpstan_config="${f}"; break; fi
+            done
+            if ! has phpstan/phpstan || [ -z "${phpstan_config}" ]; then
+              echo "::notice::Analyze skipped: it needs PHPStan (or Larastan) in require-dev and a phpstan.neon. See https://github.com/larastan/larastan."
+              analyze=false
+            fi
+          fi
+
+          # Assets: the package manager from the lockfile, and the Node version.
+          pm=''; node_lock=''; node_ver=''; node_file=''
+          if [ "${assets}" = true ]; then
+            if [ ! -f "${dir}/package.json" ] || ! jq -e '.scripts.build' "${dir}/package.json" > /dev/null; then
+              echo "::notice::Assets skipped: no package.json with a \"build\" script in '${dir}'."
+              assets=false
+            elif [ -f "${dir}/package-lock.json" ]; then pm=npm; node_lock="${dir}/package-lock.json"
+            elif [ -f "${dir}/pnpm-lock.yaml" ]; then pm=pnpm; node_lock="${dir}/pnpm-lock.yaml"
+            elif [ -f "${dir}/yarn.lock" ]; then
+              pm=yarn; node_lock="${dir}/yarn.lock"
+              if grep -q '^__metadata:' "${node_lock}"; then pm=yarn-berry; fi
+            else
+              echo "::error::Assets: no package-lock.json, pnpm-lock.yaml or yarn.lock in '${dir}'. Commit it, so CI installs the same versions as your machine."
+              exit 1
+            fi
+            if [ "${assets}" = true ]; then
+              node_ver="${NODE_VERSION}"
+              if [ -z "${node_ver}" ]; then
+                for f in .nvmrc .node-version; do
+                  if [ -f "${dir}/${f}" ]; then node_file="${dir}/${f}"; break; fi
+                done
+                [ -n "${node_file}" ] || node_ver="lts/*"
+              fi
+            fi
+          fi
+
+          runner=''
+          if [ "${test}" = true ]; then
+            if [ ! -f "${dir}/phpunit.xml" ] && [ ! -f "${dir}/phpunit.xml.dist" ]; then
+              echo "::notice::Test skipped: no phpunit.xml or phpunit.xml.dist in '${dir}'."
+              test=false
+            elif has nunomaduro/collision; then runner="php artisan test"
+            elif has pestphp/pest; then runner="vendor/bin/pest"
+            elif has phpunit/phpunit; then runner="vendor/bin/phpunit"
+            else
+              echo "::notice::Test skipped: neither PHPUnit nor Pest is installed."
+              test=false
+            fi
+          fi
+
+          {
+            echo "found=true"
+            echo "dir=${dir}"
+            echo "lockfile=${lock:-${composer}}"
+            echo "php_version=${php_ver}"
+            echo "extensions=${extensions}"
+            echo "db_connection=${DB_CONNECTION}"
+            echo "db_image=$([ "${test}" = true ] && echo "${db_image}")"
+            echo "db_port=${db_port}"
+            echo "db_user=${db_user}"
+            echo "format=${format}"
+            echo "analyze=${analyze}"
+            echo "assets=${assets}"
+            echo "test=${test}"
+            echo "runner=${runner}"
+            echo "pm=${pm}"
+            echo "node_lock=${node_lock}"
+            echo "node_version=${node_ver}"
+            echo "node_file=${node_file}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Project: ${dir} | PHP ${php_ver} (${source}) | extensions: ${extensions}"
+          echo "Steps: format=${format} analyze=${analyze} assets=${assets}${pm:+ (${pm})} test=${test}${runner:+ (${runner})} | database: ${DB_CONNECTION}${db_image:+ (${db_image})}"
+
+      # Started first, so the server boots while PHP and the dependencies install.
+      - name: Start database
+        if: steps.detect.outputs.db_image != ''
+        env:
+          IMAGE: ${{ steps.detect.outputs.db_image }}
+          CONNECTION: ${{ steps.detect.outputs.db_connection }}
+          PORT: ${{ steps.detect.outputs.db_port }}
+        run: |
+          set -euo pipefail
+          # Throwaway credentials for a server that only lives during this job.
+          case "${CONNECTION}" in
+            mysql)   args=(-e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=testing
+                           --health-cmd 'mysqladmin ping -h 127.0.0.1 -ppassword --silent') ;;
+            mariadb) args=(-e MARIADB_ROOT_PASSWORD=password -e MARIADB_DATABASE=testing
+                           --health-cmd 'healthcheck.sh --connect --innodb_initialized') ;;
+            pgsql)   args=(-e POSTGRES_PASSWORD=password -e POSTGRES_DB=testing
+                           --health-cmd 'pg_isready -h 127.0.0.1 -U postgres -d testing') ;;
+          esac
+          docker run --detach --name laravel-db --publish "127.0.0.1:${PORT}:${PORT}" \
+            --health-interval 2s --health-timeout 5s --health-retries 60 \
+            "${args[@]}" "${IMAGE}"
+
+      - name: Set up PHP
+        id: php
+        if: steps.detect.outputs.found == 'true'
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ steps.detect.outputs.php_version }}
+          extensions: ${{ steps.detect.outputs.extensions }}
+          tools: composer:v2
+          coverage: none
+
+      - name: Get Composer cache folder
+        id: composer-cache
+        if: steps.detect.outputs.found == 'true'
+        run: echo "dir=$(composer config --global cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Composer packages
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles(steps.detect.outputs.lockfile) }}
+          restore-keys: composer-${{ runner.os }}-
+
+      - name: Install dependencies
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Check formatting
+        id: format
+        if: steps.detect.outputs.format == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          if ! vendor/bin/pint --test; then
+            echo "::error::Code isn't formatted as Pint expects. Run 'vendor/bin/pint' locally and commit the changes."
+            exit 1
+          fi
+
+      - name: Analyze
+        id: analyze
+        if: steps.detect.outputs.analyze == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        # No memory cap: the runner has 16 GB, and PHPStan's default runs out on large apps.
+        run: vendor/bin/phpstan analyse --no-progress --error-format=github --memory-limit=-1
+
+      - name: Set up Node
+        if: steps.detect.outputs.assets == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.detect.outputs.node_version }}
+          node-version-file: ${{ steps.detect.outputs.node_file }}
+          # pnpm caches its own store (next step); Yarn 2+ isn't cached.
+          cache: ${{ (steps.detect.outputs.pm == 'npm' || steps.detect.outputs.pm == 'yarn') && steps.detect.outputs.pm || '' }}
+          cache-dependency-path: ${{ steps.detect.outputs.node_lock }}
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        if: steps.detect.outputs.assets == 'true' && steps.detect.outputs.pm == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ${{ steps.detect.outputs.dir }}/package.json
+          cache: true
+          cache_dependency_path: ${{ steps.detect.outputs.node_lock }}
+
+      - name: Build assets
+        id: assets
+        if: steps.detect.outputs.assets == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          PM: ${{ steps.detect.outputs.pm }}
+        run: |
+          set -euo pipefail
+          case "${PM}" in
+            npm)  npm ci; npm run build ;;
+            pnpm) pnpm install --frozen-lockfile; pnpm run build ;;
+            yarn) yarn install --frozen-lockfile; yarn run build ;;
+            yarn-berry)
+              # Corepack installs the Yarn version from packageManager.
+              npm install --global corepack@0.36.0
+              corepack enable
+              yarn install --immutable; yarn run build ;;
+          esac
+
+      - name: Wait for database
+        if: steps.detect.outputs.db_image != ''
+        run: |
+          for _ in $(seq 1 90); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' laravel-db)
+            [ "${status}" = healthy ] && { echo "Database ready."; exit 0; }
+            [ "$(docker inspect --format '{{.State.Running}}' laravel-db)" = true ] || break
+            sleep 2
+          done
+          echo "::error::The database container didn't become ready. Its log:"
+          docker logs laravel-db 2>&1 | tail -n 50
+          exit 1
+
+      - name: Test
+        id: test
+        if: steps.detect.outputs.test == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          RUNNER: ${{ steps.detect.outputs.runner }}
+          # Real environment variables win over phpunit.xml's <env> and over .env.
+          DB_CONNECTION: ${{ steps.detect.outputs.db_connection }}
+          DB_HOST: ${{ steps.detect.outputs.db_image != '' && '127.0.0.1' || '' }}
+          DB_PORT: ${{ steps.detect.outputs.db_port }}
+          DB_DATABASE: ${{ steps.detect.outputs.db_image != '' && 'testing' || ':memory:' }}
+          DB_USERNAME: ${{ steps.detect.outputs.db_user }}
+          DB_PASSWORD: ${{ steps.detect.outputs.db_image != '' && 'password' || '' }}
+        run: |
+          set -euo pipefail
+          [ -f .env ] || [ ! -f .env.example ] || cp .env.example .env
+          # Laravel needs an encryption key (sessions, cookies). A random one per run,
+          # unless phpunit.xml sets its own.
+          if ! grep -qs 'name="APP_KEY"' phpunit.xml phpunit.xml.dist; then
+            APP_KEY="base64:$(openssl rand -base64 32)"
+            echo "::add-mask::${APP_KEY}"
+            export APP_KEY
+          fi
+          # shellcheck disable=SC2086  # unquoted on purpose: "php artisan test" has arguments
+          ${RUNNER} --log-junit "${RUNNER_TEMP}/laravel-junit.xml"
+
+      - name: Summary
+        if: always() && steps.detect.outputs.found == 'true'
+        env:
+          DIR: ${{ steps.detect.outputs.dir }}
+          PHP: ${{ steps.php.outputs.php-version }}
+          DB_CONNECTION: ${{ steps.detect.outputs.db_connection }}
+          DB_IMAGE: ${{ steps.detect.outputs.db_image }}
+          RUNNER: ${{ steps.detect.outputs.runner }}
+          PM: ${{ steps.detect.outputs.pm }}
+          FORMAT: ${{ steps.detect.outputs.format }}|${{ steps.format.outcome }}
+          ANALYZE: ${{ steps.detect.outputs.analyze }}|${{ steps.analyze.outcome }}
+          ASSETS: ${{ steps.detect.outputs.assets }}|${{ steps.assets.outcome }}
+          TEST: ${{ steps.detect.outputs.test }}|${{ steps.test.outcome }}
+        run: |
+          row() {
+            local enabled="${3%%|*}" outcome="${3#*|}" icon
+            case "${outcome}" in
+              success) icon="✅" ;;
+              failure) icon="❌" ;;
+              skipped) icon="—"; outcome="skipped (an earlier step failed)" ;;
+              *) icon="—" ;;
+            esac
+            if [ "${enabled}" != true ]; then
+              echo "| $1 | \`$2\` | — not run (see STEPS and the Detect project step) |"
+            else
+              echo "| $1 | \`$2\` | ${icon} ${outcome:-not reached} |"
+            fi
+          }
+          {
+            echo "### Laravel CI: \`${DIR}\`"
+            echo
+            echo "PHP ${PHP:-?} · database: ${DB_CONNECTION}${DB_IMAGE:+ (\`${DB_IMAGE}\`)}"
+            echo
+            echo "| Step | Command | Result |"
+            echo "|---|---|---|"
+            row "Format" "pint --test" "${FORMAT}"
+            row "Analyze" "phpstan analyse" "${ANALYZE}"
+            row "Assets" "${PM:-npm} run build" "${ASSETS}"
+            row "Test" "${RUNNER:-php artisan test}" "${TEST}"
+            # Totals from the JUnit report: the first <testsuite> holds the whole run.
+            junit="${RUNNER_TEMP}/laravel-junit.xml"
+            suite=$(grep -m 1 -oE '<testsuite [^>]*>' "${junit}" 2> /dev/null || true)
+            if [ -n "${suite}" ]; then
+              attr() { grep -oE " $1=\"[0-9]+\"" <<< "${suite}" | grep -oE '[0-9]+' || echo 0; }
+              tests=$(attr tests); failed=$(( $(attr failures) + $(attr errors) )); skipped=$(attr skipped)
+              echo
+              echo "Tests: $(( tests - failed - skipped )) passed, ${failed} failed, ${skipped} skipped ($(attr assertions) assertions)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
