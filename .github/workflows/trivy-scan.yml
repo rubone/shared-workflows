@@ -1,0 +1,567 @@
+# Trivy scan: finds known vulnerabilities in a Docker image's OS packages and libraries,
+# fails on CRITICAL/HIGH ones that have a fix, and uploads the results to the repo's
+# Security tab (code scanning) when available. Uses the Trivy CLI pinned by checksum, not
+# aquasecurity/trivy-action (whose tags were hijacked in March 2026, CVE-2026-33634).
+#
+# What it scans, depending on the event:
+#   - Pull request: builds the image from the Dockerfile (amd64, with docker-build-push's
+#     layer cache) and scans it before merging. Nothing is pushed.
+#   - After "Docker build and push" pushes (workflow_run): the image it just pushed,
+#     by its sha-<commit> tag.
+#   - Weekly (schedule) and manual runs: the published image (`latest`, else the default
+#     branch's tag), to catch vulnerabilities disclosed after it was built.
+#   - Call mode: the `image` input (e.g. docker-build-push's image@digest), or as above.
+# Without a Dockerfile (and no IMAGE set), it skips with a warning (run stays green).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo, next to
+#         docker-build-push.yml.
+#      2. Edit the values under `env:` below if the defaults don't fit: CONTEXT, REGISTRY,
+#         IMAGE_NAME and ACR_NAME must match the ones in docker-build-push.yml.
+#      The pull_request / workflow_run / schedule triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        docker:
+#          uses: rubone/shared-workflows/.github/workflows/docker-build-push.yml@v1
+#          ...
+#        trivy:
+#          needs: docker
+#          permissions: { contents: read, packages: read, id-token: write, security-events: write, actions: read }
+#          uses: rubone/shared-workflows/.github/workflows/trivy-scan.yml@v1
+#          with:
+#            image: ${{ needs.docker.outputs.digest && format('{0}@{1}', needs.docker.outputs.image, needs.docker.outputs.digest) || '' }}
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/trivy-scan.md
+name: Trivy scan
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  # After docker-build-push.yml pushes an image. Must match its `name:`.
+  workflow_run:
+    workflows: ['Docker build and push']
+    types: [completed]
+  schedule:
+    - cron: '27 6 * * 1'   # Mondays 06:27 UTC
+  workflow_dispatch:
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      image:
+        description: "Image to scan (e.g. 'ghcr.io/org/app@sha256:...'). Empty = build it (PRs) or derive it from registry and image_name. Overrides env.IMAGE."
+        type: string
+        required: false
+        default: ''
+      context:
+        description: "Docker build context for PR builds, relative to the repo root. Overrides env.CONTEXT."
+        type: string
+        required: false
+        default: ''
+      dockerfile:
+        description: "Path to the Dockerfile. Empty = <context>/Dockerfile. Overrides env.DOCKERFILE."
+        type: string
+        required: false
+        default: ''
+      build_args:
+        description: "Build arguments for PR builds, one KEY=value per line. Overrides env.BUILD_ARGS."
+        type: string
+        required: false
+        default: ''
+      target:
+        description: "Multi-stage target for PR builds. Overrides env.TARGET."
+        type: string
+        required: false
+        default: ''
+      registry:
+        description: "'ghcr' or 'acr', to derive the published image. Overrides env.REGISTRY."
+        type: string
+        required: false
+        default: ''
+      image_name:
+        description: "Image name, as in docker-build-push. Empty = the repo name. Overrides env.IMAGE_NAME."
+        type: string
+        required: false
+        default: ''
+      acr_name:
+        description: "Azure Container Registry name (without .azurecr.io) when registry is 'acr'. Overrides env.ACR_NAME."
+        type: string
+        required: false
+        default: ''
+      schedule_tag:
+        description: "Tag scanned on schedule and manual runs. 'auto' = latest, else the default branch. Overrides env.SCHEDULE_TAG."
+        type: string
+        required: false
+        default: ''
+      platform:
+        description: "Platform to scan in a multi-platform image (e.g. 'linux/arm64'). Overrides env.PLATFORM."
+        type: string
+        required: false
+        default: ''
+      fail_on:
+        description: "Severities that fail the check, comma-separated, or 'none'. Overrides env.FAIL_ON."
+        type: string
+        required: false
+        default: ''
+      fail_on_unfixed:
+        description: "true = also fail on vulnerabilities without a fixed version. false falls back to env.FAIL_ON_UNFIXED."
+        type: boolean
+        required: false
+        default: false
+      upload_sarif:
+        description: "'auto' = upload to code scanning when the repo supports it; 'off' = summary only. Overrides env.UPLOAD_SARIF."
+        type: string
+        required: false
+        default: ''
+      azure_client_id:
+        description: "Client ID of the identity with AcrPull (registry 'acr'). Overrides env.AZURE_CLIENT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_tenant_id:
+        description: "Microsoft Entra tenant ID (registry 'acr'). Overrides env.AZURE_TENANT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_subscription_id:
+        description: "Azure subscription ID (registry 'acr'). Overrides env.AZURE_SUBSCRIPTION_ID."
+        type: string
+        required: false
+        default: ''
+    outputs:
+      image:
+        description: "The image reference that was scanned."
+        value: ${{ jobs.scan.outputs.image }}
+      critical:
+        description: "Number of CRITICAL vulnerabilities."
+        value: ${{ jobs.scan.outputs.critical }}
+      high:
+        description: "Number of HIGH vulnerabilities."
+        value: ${{ jobs.scan.outputs.high }}
+      blocking:
+        description: "Number of vulnerabilities that fail the check (FAIL_ON, with a fix unless FAIL_ON_UNFIXED)."
+        value: ${{ jobs.scan.outputs.blocking }}
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Image to scan, e.g. 'ghcr.io/org/app:main'. Empty = build it on PRs, else derive it
+  # from REGISTRY / IMAGE_NAME / ACR_NAME like docker-build-push.yml does.
+  IMAGE: ''
+  # PR builds: same values as in docker-build-push.yml.
+  CONTEXT: '.'
+  DOCKERFILE: ''
+  BUILD_ARGS: ''
+  TARGET: ''
+  # Where docker-build-push.yml publishes: same values as there.
+  REGISTRY: 'ghcr'
+  IMAGE_NAME: ''
+  ACR_NAME: ''
+  # Tag scanned weekly and on manual runs: 'auto' = latest if it exists, else the default
+  # branch's tag (main); or a fixed tag.
+  SCHEDULE_TAG: 'auto'
+  # Platform scanned in multi-platform images.
+  PLATFORM: 'linux/amd64'
+  # Severities that fail the check (UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL), or 'none' to only
+  # report. All severities are reported either way.
+  FAIL_ON: 'CRITICAL,HIGH'
+  # 'false' = only vulnerabilities with a fixed version fail (the ones you can act on).
+  FAIL_ON_UNFIXED: 'false'
+  # 'auto' = upload results to the Security tab when code scanning is available (public
+  # repos, or private ones with GitHub Code Security); 'off' = job summary only.
+  UPLOAD_SARIF: 'auto'
+  # ACR only: an identity with AcrPull on the registry (see the docs).
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+  # Tool version, pinned with its checksum. To update, change both together; the
+  # checksum is in trivy_<version>_checksums.txt on the release page (Linux-64bit.tar.gz).
+  TRIVY_VERSION: '0.76.1'
+  TRIVY_SHA256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+
+jobs:
+  scan:
+    name: Trivy image scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # After docker-build-push: only when it succeeded on a push (it doesn't push on PRs).
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    permissions:
+      contents: read
+      packages: read           # pull private GHCR images
+      id-token: write          # Azure login (ACR)
+      security-events: write   # upload results to code scanning
+      actions: read            # code scanning upload in private repos
+    outputs:
+      image: ${{ steps.scan.outputs.image }}
+      critical: ${{ steps.scan.outputs.critical }}
+      high: ${{ steps.scan.outputs.high }}
+      blocking: ${{ steps.scan.outputs.blocking }}
+    concurrency:
+      group: trivy-scan-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.image || inputs.context }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect image
+        id: detect
+        env:
+          IMAGE: ${{ inputs.image || env.IMAGE }}
+          CONTEXT: ${{ inputs.context || env.CONTEXT }}
+          DOCKERFILE: ${{ inputs.dockerfile || env.DOCKERFILE }}
+          BUILD_ARGS: ${{ inputs.build_args || env.BUILD_ARGS }}
+          TARGET: ${{ inputs.target || env.TARGET }}
+          REGISTRY: ${{ inputs.registry || env.REGISTRY }}
+          IMAGE_NAME: ${{ inputs.image_name || env.IMAGE_NAME }}
+          ACR_NAME: ${{ inputs.acr_name || env.ACR_NAME }}
+          SCHEDULE_TAG: ${{ inputs.schedule_tag || env.SCHEDULE_TAG }}
+          PLATFORM: ${{ inputs.platform || env.PLATFORM }}
+          FAIL_ON: ${{ inputs.fail_on || env.FAIL_ON }}
+          FAIL_ON_UNFIXED: ${{ inputs.fail_on_unfixed || env.FAIL_ON_UNFIXED }}
+          UPLOAD_SARIF: ${{ inputs.upload_sarif || env.UPLOAD_SARIF }}
+          AZURE_CLIENT_ID: ${{ inputs.azure_client_id || env.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ inputs.azure_tenant_id || env.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id || env.AZURE_SUBSCRIPTION_ID }}
+          EVENT: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          FORK_PR: ${{ github.event.pull_request.head.repo.fork || false }}
+        run: |
+          set -euo pipefail
+
+          skip() {
+            echo "::warning::$1"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          # Normalizes a repo-relative path into $p, or fails.
+          relpath() {
+            p="${1%/}"; p="${p#./}"; p="${p:-.}"
+            if [[ "${p}" == /* || "/${p}/" == */../* ]]; then
+              echo "::error::$2 must be a path inside the repo, relative to its root. Got: '$1'."
+              exit 1
+            fi
+          }
+
+          # Settings.
+          severities="${FAIL_ON^^}"; severities="${severities// /}"
+          if [ "${severities}" != NONE ]; then
+            for s in ${severities//,/ }; do
+              case "${s}" in UNKNOWN|LOW|MEDIUM|HIGH|CRITICAL) ;; *)
+                echo "::error::Unknown severity '${s}' in FAIL_ON. Use UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL, or 'none'."; exit 1 ;;
+              esac
+            done
+          fi
+          case "${FAIL_ON_UNFIXED}" in true|false) ;; *)
+            echo "::error::FAIL_ON_UNFIXED must be 'true' or 'false'. Got: '${FAIL_ON_UNFIXED}'."; exit 1 ;;
+          esac
+          case "${UPLOAD_SARIF}" in auto|off) ;; *)
+            echo "::error::UPLOAD_SARIF must be 'auto' or 'off'. Got: '${UPLOAD_SARIF}'."; exit 1 ;;
+          esac
+          if ! [[ "${PLATFORM}" =~ ^linux/[a-z0-9]+(/v[0-9]+)?$ ]]; then
+            echo "::error::'${PLATFORM}' isn't a valid platform (e.g. linux/amd64, linux/arm64)."; exit 1
+          fi
+          relpath "${CONTEXT}" CONTEXT; ctx="${p}"
+          file="${ctx}/Dockerfile"
+          if [ -n "${DOCKERFILE}" ]; then relpath "${DOCKERFILE}" DOCKERFILE; file="${p}"; fi
+
+          # The published image, derived like docker-build-push.yml: <host>/<name>, lowercase.
+          derive() {
+            local repo="${GITHUB_REPOSITORY,,}" name="${IMAGE_NAME,,}" host acr
+            case "${REGISTRY}" in
+              ghcr)
+                host=ghcr.io
+                if [ -z "${name}" ]; then name="${repo}"; elif [[ "${name}" != */* ]]; then name="${repo%%/*}/${name}"; fi ;;
+              acr)
+                acr="${ACR_NAME,,}"; acr="${acr%.azurecr.io}"
+                if ! [[ "${acr}" =~ ^[a-z0-9]{5,50}$ ]]; then
+                  echo "::error::REGISTRY is 'acr': set ACR_NAME to the registry name (5-50 letters and digits, without .azurecr.io). Got: '${ACR_NAME}'." >&2
+                  exit 1
+                fi
+                host="${acr}.azurecr.io"; name="${name:-${repo#*/}}" ;;
+              *) echo "::error::REGISTRY must be 'ghcr' or 'acr'. Got: '${REGISTRY}'." >&2; exit 1 ;;
+            esac
+            if ! [[ "${name}" =~ ^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$ ]]; then
+              echo "::error::'${name}' isn't a valid image name (lowercase letters, digits, '.', '_', '-' and '/')." >&2
+              exit 1
+            fi
+            printf '%s/%s' "${host}" "${name}"
+          }
+
+          # What to scan: an explicit image, a local build (PRs), or the published image.
+          build=false; refs=''
+          if [ -n "${IMAGE}" ]; then
+            refs="${IMAGE}"; base="${IMAGE%@*}"
+            # Strip a tag (after the last '/', so registry ports stay).
+            last="${base##*/}"; [[ "${last}" == *:* ]] && base="${base%:*}"
+            source="IMAGE"
+          else
+            [ -f "${file}" ] || skip "No Dockerfile at '${file}' and no IMAGE set; skipping the Trivy scan. If the Dockerfile is elsewhere, set CONTEXT or DOCKERFILE."
+            base=$(derive)
+            case "${EVENT}" in
+              pull_request*)
+                build=true; refs="trivy-scan/local:pr"; source="built from ${file}" ;;
+              workflow_run|push)
+                # docker-build-push tags every pushed image sha-<7-char commit>.
+                refs="${base}:sha-${RUN_SHA:0:7}"; source="pushed for ${RUN_SHA:0:7}" ;;
+              schedule|workflow_dispatch)
+                if [ "${SCHEDULE_TAG}" = auto ]; then
+                  refs="${base}:latest ${base}:${DEFAULT_BRANCH}"; source="published (latest, else ${DEFAULT_BRANCH})"
+                else
+                  refs="${base}:${SCHEDULE_TAG}"; source="published (${SCHEDULE_TAG})"
+                fi ;;
+              *) skip "Event '${EVENT}' isn't supported without IMAGE; skipping the Trivy scan." ;;
+            esac
+          fi
+          host="${base%%/*}"; login=none
+          if [ "${build}" = false ]; then
+            case "${host}" in
+              ghcr.io) login=ghcr ;;
+              *.azurecr.io)
+                login=acr
+                missing=()
+                [ -n "${AZURE_CLIENT_ID}" ] || missing+=(AZURE_CLIENT_ID)
+                [ -n "${AZURE_TENANT_ID}" ] || missing+=(AZURE_TENANT_ID)
+                [ -n "${AZURE_SUBSCRIPTION_ID}" ] || missing+=(AZURE_SUBSCRIPTION_ID)
+                if [ "${#missing[@]}" -gt 0 ]; then
+                  echo "::error::The image is in ACR (${host}) but these values are missing: ${missing[*]}. Add them as repository variables (Settings → Secrets and variables → Actions → Variables)."
+                  exit 1
+                fi ;;
+            esac
+          fi
+          # Fork PRs get a read-only token: no upload.
+          sarif=false
+          if [ "${UPLOAD_SARIF}" = auto ] && [ "${FORK_PR}" != true ]; then sarif=true; fi
+
+          {
+            echo "found=true"
+            echo "build=${build}"
+            echo "refs=${refs}"
+            echo "base=${base}"
+            echo "login=${login}"
+            echo "acr=${host%%.*}"
+            echo "context=${ctx}"
+            echo "file=${file}"
+            echo "slug=$(printf '%s' "${ctx}" | tr -c 'A-Za-z0-9._-' '-')"
+            echo "platform=${PLATFORM}"
+            echo "platslug=${PLATFORM//\//-}"
+            echo "target=${TARGET}"
+            echo "fail_on=${severities}"
+            echo "fail_on_unfixed=${FAIL_ON_UNFIXED}"
+            echo "sarif=${sarif}"
+            echo "category=trivy-image:${base}"
+            echo 'build_args<<BUILD_ARGS_EOF'
+            printf '%s\n' "${BUILD_ARGS}"
+            echo 'BUILD_ARGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "Image: ${refs// / or } (${source}) | platform: ${PLATFORM} | fail on: ${severities}$([ "${FAIL_ON_UNFIXED}" = false ] && [ "${severities}" != NONE ] && echo ', with a fix') | upload: ${sarif}"
+
+      - name: Install Trivy
+        if: steps.detect.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${tarball}"
+          echo "${TRIVY_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/trivy"
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}/trivy" trivy
+          echo "${RUNNER_TEMP}/trivy" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/trivy/trivy" --version
+
+      - name: Set up Buildx
+        if: steps.detect.outputs.build == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Reads docker-build-push's layer cache (same scope), so this rebuild is mostly cached.
+      - name: Build image
+        if: steps.detect.outputs.build == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ steps.detect.outputs.context }}
+          file: ${{ steps.detect.outputs.file }}
+          platforms: ${{ steps.detect.outputs.platform }}
+          build-args: ${{ steps.detect.outputs.build_args }}
+          target: ${{ steps.detect.outputs.target }}
+          tags: ${{ steps.detect.outputs.refs }}
+          load: true
+          provenance: false
+          cache-from: type=gha,scope=docker-${{ steps.detect.outputs.slug }}-${{ steps.detect.outputs.platslug }}
+
+      - name: Log in to GHCR
+        if: steps.detect.outputs.login == 'ghcr'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Log in to Azure
+        if: steps.detect.outputs.login == 'acr'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ inputs.azure_client_id || env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ inputs.azure_tenant_id || env.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        if: steps.detect.outputs.login == 'acr'
+        env:
+          ACR: ${{ steps.detect.outputs.acr }}
+        run: az acr login --name "${ACR}"
+
+      - name: Scan
+        id: scan
+        if: steps.detect.outputs.found == 'true'
+        env:
+          BUILD: ${{ steps.detect.outputs.build }}
+          REFS: ${{ steps.detect.outputs.refs }}
+          PLATFORM: ${{ steps.detect.outputs.platform }}
+          FAIL_ON: ${{ steps.detect.outputs.fail_on }}
+          FAIL_ON_UNFIXED: ${{ steps.detect.outputs.fail_on_unfixed }}
+        run: |
+          set -euo pipefail
+          # First reference that exists (schedule: latest, else the default branch's tag).
+          ref=''
+          if [ "${BUILD}" = true ]; then
+            ref="${REFS}"; src=docker
+          else
+            src=remote
+            for r in ${REFS}; do
+              if docker buildx imagetools inspect "${r}" > /dev/null 2>&1; then ref="${r}"; break; fi
+              echo "Not found: ${r}"
+            done
+            if [ -z "${ref}" ]; then
+              echo "::error::Image not found in the registry: ${REFS// / or }. Check that docker-build-push pushed it and that REGISTRY / IMAGE_NAME match; for a private GHCR image, the caller needs packages: read."
+              exit 1
+            fi
+          fi
+          echo "image=${ref}" >> "$GITHUB_OUTPUT"
+
+          args=(image --scanners vuln --image-src "${src}" --platform "${PLATFORM}" --no-progress
+                --format json --output "${RUNNER_TEMP}/trivy.json")
+          # .trivyignore at the repo root is read by default; the YAML form needs the flag.
+          [ -f .trivyignore.yaml ] && args+=(--ignorefile .trivyignore.yaml)
+          trivy "${args[@]}" "${ref}"
+          trivy convert --format sarif --output "${RUNNER_TEMP}/trivy.sarif" "${RUNNER_TEMP}/trivy.json"
+          trivy convert --format table "${RUNNER_TEMP}/trivy.json"
+
+          # Counts per severity, and the ones that fail the check.
+          vulns() { jq -c '[.Results[]?.Vulnerabilities[]?]' "${RUNNER_TEMP}/trivy.json"; }
+          count() { vulns | jq --arg s "$1" '[.[] | select(.Severity == $s)] | length'; }
+          blocking=0
+          if [ "${FAIL_ON}" != NONE ]; then
+            blocking=$(vulns | jq --arg f "${FAIL_ON}" --argjson unfixed "${FAIL_ON_UNFIXED}" \
+              '[.[] | select((.Severity as $s | $f | split(",") | index($s)) and ($unfixed or ((.FixedVersion // "") != "")))] | length')
+          fi
+          {
+            echo "critical=$(count CRITICAL)"
+            echo "high=$(count HIGH)"
+            echo "blocking=${blocking}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check code scanning support
+        id: support
+        if: steps.scan.outcome == 'success' && steps.detect.outputs.sarif == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # 200 = has analyses; 404 "no analysis found" = enabled, nothing uploaded yet.
+          if out=$(gh api "repos/${REPO}/code-scanning/analyses?per_page=1" --silent 2>&1) \
+             || printf '%s' "${out}" | grep -q 'no analysis found'; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Code scanning isn't available for ${REPO} (private repo without GitHub Code Security, or no security-events permission); results are only in the job summary. API said: ${out}"
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to code scanning
+        if: steps.support.outputs.supported == 'true'
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: ${{ runner.temp }}/trivy.sarif
+          category: ${{ steps.detect.outputs.category }}
+
+      - name: Summary
+        if: always() && steps.scan.outputs.image != ''
+        env:
+          IMAGE: ${{ steps.scan.outputs.image }}
+          BUILD: ${{ steps.detect.outputs.build }}
+          FAIL_ON: ${{ steps.detect.outputs.fail_on }}
+          FAIL_ON_UNFIXED: ${{ steps.detect.outputs.fail_on_unfixed }}
+          BLOCKING: ${{ steps.scan.outputs.blocking }}
+          UPLOADED: ${{ steps.support.outputs.supported }}
+        run: |
+          json="${RUNNER_TEMP}/trivy.json"
+          {
+            echo "### Trivy scan: \`${IMAGE}\`"
+            echo
+            if [ ! -s "${json}" ]; then
+              echo "The scan didn't finish; see the Scan step's log."
+              exit 0
+            fi
+            os=$(jq -r '.Metadata.OS // empty | "\(.Family) \(.Name)"' "${json}")
+            digest=$(jq -r '.Metadata.RepoDigests[0]? // empty | split("@")[1]' "${json}")
+            echo "${os:-No OS detected (distroless, scratch or busybox: only libraries are scanned)}${digest:+ · \`${digest}\`}$([ "${BUILD}" = true ] && echo ' · built from this PR')"
+            if jq -e '.Metadata.OS.EOSL == true' "${json}" > /dev/null; then
+              echo
+              echo "> [!WARNING]"
+              echo "> ${os} is end of life: it gets no more security fixes. Update the base image."
+            fi
+            echo
+            echo "| Severity | Found | With a fix |"
+            echo "|---|---|---|"
+            for s in CRITICAL HIGH MEDIUM LOW UNKNOWN; do
+              jq -r --arg s "${s}" '[.Results[]?.Vulnerabilities[]? | select(.Severity == $s)]
+                | "| \($s) | \(length) | \(map(select((.FixedVersion // "") != "")) | length) |"' "${json}"
+            done
+            echo
+            if [ "${FAIL_ON}" = NONE ]; then
+              echo "Report only (FAIL_ON is 'none')."
+            elif [ "${BLOCKING:-0}" -gt 0 ]; then
+              echo "❌ **${BLOCKING}** ${FAIL_ON//,/\/} vulnerabilities$([ "${FAIL_ON_UNFIXED}" = false ] && echo ' with a fix') fail the check."
+            else
+              echo "✅ No ${FAIL_ON//,/\/} vulnerabilities$([ "${FAIL_ON_UNFIXED}" = false ] && echo ' with a fix')."
+            fi
+            # The most severe ones first, up to 30.
+            rows=$(jq -r '[.Results[]? | .Target as $t | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")]
+              | sort_by(if .Severity == "CRITICAL" then 0 else 1 end, ((.FixedVersion // "") == ""))
+              | .[:30][]
+              | "| \(.Severity) | [\(.VulnerabilityID)](\(.PrimaryURL // "https://avd.aquasec.com/nvd/\(.VulnerabilityID | ascii_downcase)")) | `\(.PkgName)` | \(.InstalledVersion) | \(.FixedVersion // "" | if . == "" then "—" else . end) |"' "${json}")
+            if [ -n "${rows}" ]; then
+              echo
+              echo "| Severity | Vulnerability | Package | Installed | Fixed in |"
+              echo "|---|---|---|---|---|"
+              echo "${rows}"
+            fi
+            echo
+            if [ "${UPLOADED}" = true ]; then
+              echo "All findings are in **Security → Code scanning** (tool: Trivy)."
+            else
+              echo "Code scanning upload: off or not available; the full list is in the Scan step's log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Last, so the results are uploaded and summarized even when it fails.
+      - name: Check vulnerabilities
+        if: steps.scan.outcome == 'success'
+        env:
+          BLOCKING: ${{ steps.scan.outputs.blocking }}
+          FAIL_ON: ${{ steps.detect.outputs.fail_on }}
+        run: |
+          if [ "${BLOCKING}" -gt 0 ]; then
+            echo "::error::${BLOCKING} ${FAIL_ON} vulnerabilities that fail the check; see the job summary. Update the base image or the packages, or accept a finding in .trivyignore."
+            exit 1
+          fi
+          echo "No vulnerabilities that fail the check."

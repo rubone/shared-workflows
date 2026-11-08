@@ -1,0 +1,47 @@
+# Call mode: build, push and scan in one workflow. Copy to .github/workflows/docker.yml in
+# the project repo (replaces examples/docker-build-push.yml).
+# To not depend on this repo (or if the org blocks external workflows), copy
+# .github/workflows/docker-build-push.yml and .github/workflows/trivy-scan.yml instead
+# (copy mode): trivy-scan.yml then runs after each push on its own.
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/trivy-scan.md
+name: Docker
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  schedule:
+    - cron: '27 6 * * 1'   # weekly scan of the published image
+
+permissions: {}
+
+jobs:
+  docker:
+    if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: rubone/shared-workflows/.github/workflows/docker-build-push.yml@v1
+
+  trivy:
+    needs: docker
+    # Also on schedule, when the build job is skipped.
+    if: ${{ !failure() && !cancelled() }}
+    permissions:
+      contents: read
+      packages: read
+      id-token: write          # ACR only
+      security-events: write   # Security tab
+      actions: read
+    uses: rubone/shared-workflows/.github/workflows/trivy-scan.yml@v1
+    with:
+      # The image just pushed, by digest. Empty on PRs (nothing is pushed): the scan builds
+      # it instead. Empty on schedule: the scan picks the published latest / main.
+      image: ${{ needs.docker.outputs.digest && format('{0}@{1}', needs.docker.outputs.image, needs.docker.outputs.digest) || '' }}
+      fail_on: 'CRITICAL,HIGH'   # or 'none' to only report

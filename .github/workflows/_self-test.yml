@@ -224,3 +224,63 @@ jobs:
       platforms: linux/amd64,linux/arm64
       build_args: |
         GREETING=Hello from the self-test
+
+  # Smoke test of call mode on PRs: builds tests/fixtures/docker (with docker-build-push's
+  # layer cache), scans it and uploads the results to this repo's code scanning; plus the
+  # repo root, which has no Dockerfile and must skip with a warning.
+  trivy-scan:
+    name: Trivy (smoke test, ${{ matrix.context }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        context:
+          - tests/fixtures/docker
+          - .
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/trivy-scan.yml
+    with:
+      context: ${{ matrix.context }}
+      image_name: shared-workflows-fixture
+      build_args: |
+        GREETING=Hello from the self-test
+
+  # Scans an old Alpine (pinned by digest) with known, fixed CRITICAL and HIGH
+  # vulnerabilities, in report-only mode and without uploading them to this repo's
+  # Security tab. The next job checks that they were found and didn't fail the run.
+  trivy-scan-vulnerable:
+    name: Trivy (smoke test, vulnerable image)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/trivy-scan.yml
+    with:
+      image: alpine:3.18.0@sha256:02bb6f428431fbc2809c5d1b41eab5a68350194fb508869a33cb1af4444c9b11
+      fail_on: none
+      upload_sarif: 'off'
+
+  trivy-scan-outputs:
+    name: Trivy (smoke test, check outputs)
+    needs: trivy-scan-vulnerable
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the scan's outputs
+        env:
+          CRITICAL: ${{ needs.trivy-scan-vulnerable.outputs.critical }}
+          HIGH: ${{ needs.trivy-scan-vulnerable.outputs.high }}
+          BLOCKING: ${{ needs.trivy-scan-vulnerable.outputs.blocking }}
+        run: |
+          echo "critical=${CRITICAL} high=${HIGH} blocking=${BLOCKING}"
+          if [ "${CRITICAL:-0}" -eq 0 ] || [ "${HIGH:-0}" -eq 0 ] || [ "${BLOCKING}" != 0 ]; then
+            echo "::error::Expected CRITICAL and HIGH findings and nothing blocking (fail_on: none)."
+            exit 1
+          fi

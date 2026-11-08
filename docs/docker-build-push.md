@@ -175,6 +175,9 @@ Pushed images carry two attestations, built by BuildKit: a **provenance** record
 where it was built) and an **SBOM** (the packages inside). Tools like Docker Scout and Trivy
 read them. GHCR lists them as extra entries with platform `unknown/unknown`: that's expected.
 
+To scan the image for known vulnerabilities on every PR, after each push and weekly, add
+[trivy-scan](trivy-scan.md).
+
 ---
 
 ## GHCR notes
