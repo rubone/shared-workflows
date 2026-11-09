@@ -1,0 +1,35 @@
+# Call mode: copy to .github/workflows/azure-webapp-deploy.yml in the project repo.
+# To not depend on this repo for the workflow (or if the org blocks external workflows), copy
+# .github/workflows/azure-webapp-deploy.yml instead (copy mode). Both sign in with the
+# rubone/shared-workflows/actions/azure-login action.
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/azure-webapp-deploy.md
+name: Web App deploy
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  webapp:
+    permissions:
+      contents: read
+      id-token: write   # OIDC login to Azure
+    uses: rubone/shared-workflows/.github/workflows/azure-webapp-deploy.yml@v1
+    with:
+      app_name: 'my-api'              # the Web App in Azure
+      working_directory: '.'          # folder with the app
+      stack: 'auto'                   # or 'dotnet' / 'node'
+      project: ''                     # .NET: empty = the only web project
+      resource_group: ''              # empty = found by name
+      startup_command: ''             # Linux; empty = App Service's default
+      health_check_path: '/health'    # checked after the deploy; '' = no check
+      environment: 'production'       # GitHub environment of the deploy job
+      # azure_client_id / azure_tenant_id / azure_subscription_id default to the
+      # AZURE_* repository variables.

@@ -1,0 +1,585 @@
+# Azure Web App deploy: builds a .NET or Node app into a ready-to-run package and deploys it
+# to Azure App Service (Linux or Windows). PRs only build; pushes to the default branch (and
+# manual runs on it) deploy to the production slot.
+#
+# Detected from the project, nothing to set in most repos:
+#   - Stack: .NET when there's a web project (Microsoft.NET.Sdk.Web), Node when there's a
+#     package.json. Set STACK when the folder has both.
+#   - .NET: the only web project, published with `dotnet publish`. SDK from global.json, else
+#     DOTNET_VERSION.
+#   - Node: package manager from the lockfile and Node version as in node-ci. Runs the build
+#     script when there is one, then reinstalls only production dependencies.
+# Without either one, it skips with a warning (run stays green). It doesn't run tests: pair
+# it with dotnet-ci or node-ci.
+#
+# Authentication: OpenID Connect, no stored secret. An identity with Website Contributor on
+# the Web App, the AZURE_* repository variables and APP_NAME. The sign-in uses the
+# rubone/shared-workflows/actions/azure-login action (also in copy mode, so the organization
+# must allow actions from rubone/shared-workflows).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below (at least APP_NAME).
+#      The pull_request / push triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        webapp:
+#          permissions: { contents: read, id-token: write }
+#          uses: rubone/shared-workflows/.github/workflows/azure-webapp-deploy.yml@v1
+#          with:
+#            app_name: my-api
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/azure-webapp-deploy.md
+name: Web App deploy
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder with the app (package.json, or the .NET project or solution), relative to the repo root. Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      stack:
+        description: "'auto', 'dotnet' or 'node'. Overrides env.STACK."
+        type: string
+        required: false
+        default: ''
+      project:
+        description: ".NET project to publish, relative to working_directory. Empty = the only web project. Overrides env.PROJECT."
+        type: string
+        required: false
+        default: ''
+      dotnet_version:
+        description: ".NET SDK when there's no global.json (e.g. '10.0.x'). Overrides env.DOTNET_VERSION."
+        type: string
+        required: false
+        default: ''
+      node_version:
+        description: "Node version (e.g. '24'). Empty = from .nvmrc, .node-version or package.json. Overrides env.NODE_VERSION."
+        type: string
+        required: false
+        default: ''
+      build_script:
+        description: "Node only: package.json script that builds the app. Overrides env.BUILD_SCRIPT."
+        type: string
+        required: false
+        default: ''
+      app_name:
+        description: "Name of the Web App in Azure. Overrides env.APP_NAME."
+        type: string
+        required: false
+        default: ''
+      resource_group:
+        description: "Resource group of the Web App. Empty = found by name. Overrides env.RESOURCE_GROUP."
+        type: string
+        required: false
+        default: ''
+      startup_command:
+        description: "Startup command (Linux). Empty = App Service's default for the stack. Overrides env.STARTUP_COMMAND."
+        type: string
+        required: false
+        default: ''
+      health_check_path:
+        description: "Path checked after the deploy (e.g. '/health'). Empty = no check. Overrides env.HEALTH_CHECK_PATH."
+        type: string
+        required: false
+        default: ''
+      environment:
+        description: "GitHub environment of the deploy job. Overrides env.ENVIRONMENT."
+        type: string
+        required: false
+        default: ''
+      azure_client_id:
+        description: "Client ID of the identity with Website Contributor on the Web App. Overrides env.AZURE_CLIENT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_tenant_id:
+        description: "Microsoft Entra tenant ID. Overrides env.AZURE_TENANT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_subscription_id:
+        description: "Azure subscription ID. Overrides env.AZURE_SUBSCRIPTION_ID."
+        type: string
+        required: false
+        default: ''
+    outputs:
+      url:
+        description: "URL of the deployed app (empty when nothing was deployed)."
+        value: ${{ jobs.deploy.outputs.url }}
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder with the app, relative to the repo root ('.' = root).
+  WORKING_DIRECTORY: '.'
+  # 'auto' = .NET if there's a web project, else Node if there's a package.json.
+  STACK: 'auto'
+  # .NET: project to publish, relative to WORKING_DIRECTORY. Empty = the only web project
+  # (Microsoft.NET.Sdk.Web) in it or up to two folders below (e.g. src/Api/Api.csproj).
+  PROJECT: ''
+  # .NET SDK, used when there's no global.json (global.json always wins).
+  DOTNET_VERSION: '10.0.x'
+  # Node version. Empty = .nvmrc / .node-version / package.json, else the latest LTS.
+  NODE_VERSION: ''
+  # pnpm only, used when package.json has no "packageManager": "pnpm@x.y.z" field.
+  PNPM_VERSION: '10'
+  # Node: package.json script that builds the app. Skipped if package.json doesn't have it.
+  BUILD_SCRIPT: 'build'
+  # The Web App in Azure.
+  APP_NAME: ''
+  RESOURCE_GROUP: ''
+  # Linux only. Empty = App Service's default (Node: npm start; .NET: the app's dll).
+  STARTUP_COMMAND: ''
+  # Path requested after the deploy until it answers (e.g. '/health'). Empty = no check.
+  HEALTH_CHECK_PATH: ''
+  # GitHub environment of the deploy job: shows the URL and deploy history in the repo, and
+  # can require approvals. The OIDC federated credential must match it (see the docs).
+  ENVIRONMENT: 'production'
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  build:
+    name: Build package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      deploy: ${{ steps.detect.outputs.deploy }}
+      app_name: ${{ steps.detect.outputs.app_name }}
+      environment: ${{ steps.detect.outputs.environment }}
+      artifact: ${{ steps.detect.outputs.artifact }}
+    concurrency:
+      group: webapp-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.working_directory }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect project
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          STACK: ${{ inputs.stack || env.STACK }}
+          PROJECT: ${{ inputs.project || env.PROJECT }}
+          DOTNET_VERSION: ${{ inputs.dotnet_version || env.DOTNET_VERSION }}
+          NODE_VERSION: ${{ inputs.node_version || env.NODE_VERSION }}
+          BUILD_SCRIPT: ${{ inputs.build_script || env.BUILD_SCRIPT }}
+          STARTUP_COMMAND: ${{ inputs.startup_command || env.STARTUP_COMMAND }}
+          APP_NAME: ${{ inputs.app_name || env.APP_NAME }}
+          ENVIRONMENT: ${{ inputs.environment || env.ENVIRONMENT }}
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"
+          dir="${dir#./}"
+          dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a folder inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          if [ ! -d "${dir}" ]; then
+            echo "::error::WORKING_DIRECTORY '${dir}' doesn't exist."
+            exit 1
+          fi
+
+          # Web projects in the folder or up to two levels below (Api.csproj, Api/Api.csproj,
+          # src/Api/Api.csproj); build output, node_modules and .git left out.
+          web_projects() {
+            find "${dir}" -maxdepth 3 \( -name bin -o -name obj -o -name .git -o -name node_modules \) -prune \
+              -o -type f \( -name '*.csproj' -o -name '*.fsproj' \) -print \
+              | while IFS= read -r p; do
+                  if grep -qE 'Sdk="Microsoft\.NET\.Sdk\.Web"' "${p}"; then echo "${p#"${dir}"/}"; fi
+                done | sort
+          }
+
+          kind="${STACK}"
+          case "${kind}" in
+            auto)
+              if [ -n "${PROJECT}" ] || [ -n "$(web_projects)" ]; then
+                kind=dotnet
+              elif [ -f "${dir}/package.json" ]; then
+                kind=node
+              else
+                echo "::warning::No .NET web project or package.json in '${dir}'; skipping the Web App build. If the app is in a subfolder, set WORKING_DIRECTORY."
+                echo "found=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi ;;
+            dotnet|node) ;;
+            *) echo "::error::STACK must be 'auto', 'dotnet' or 'node'. Got: '${STACK}'."; exit 1 ;;
+          esac
+
+          out=()
+          if [ "${kind}" = dotnet ]; then
+            if [ -n "${PROJECT}" ]; then
+              project="${PROJECT#./}"
+              if [[ "${project}" == /* || "/${project}/" == */../* ]] || [ ! -f "${dir}/${project}" ]; then
+                echo "::error::PROJECT '${PROJECT}' not found in '${dir}'."
+                exit 1
+              fi
+            else
+              mapfile -t projects < <(web_projects)
+              if [ "${#projects[@]}" -eq 0 ]; then
+                echo "::error::No web project (Sdk=\"Microsoft.NET.Sdk.Web\") under '${dir}'. Set PROJECT to the project to publish."
+                exit 1
+              elif [ "${#projects[@]}" -gt 1 ]; then
+                echo "::error::More than one web project under '${dir}' (${projects[*]}). Set PROJECT to the one this Web App runs."
+                exit 1
+              fi
+              project="${projects[0]}"
+            fi
+            global_json=""
+            for f in "${dir}/global.json" "global.json"; do
+              if [ -f "${f}" ]; then global_json="${f}"; break; fi
+            done
+            if [ -z "${global_json}" ] && [ -z "${DOTNET_VERSION}" ]; then
+              echo "::error::No global.json and DOTNET_VERSION is empty: set one of them (e.g. '10.0.x')."
+              exit 1
+            fi
+            out+=("project=${project}" "global_json=${global_json}"
+                  "dotnet_version=$([ -n "${global_json}" ] || printf '%s' "${DOTNET_VERSION}")")
+            echo "Stack: .NET | project: ${dir}/${project} | SDK: ${global_json:-${DOTNET_VERSION}}"
+          else
+            pkg="${dir}/package.json"
+            if [ ! -f "${pkg}" ]; then
+              echo "::error::No package.json in '${dir}'."
+              exit 1
+            fi
+            jq empty "${pkg}" 2> /dev/null || { echo "::error::${pkg} isn't valid JSON."; exit 1; }
+            # The package is the app folder with its own node_modules, so the lockfile must be
+            # there: a workspace's hoisted dependencies would be left out.
+            lockfile=""
+            for f in package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock; do
+              if [ -f "${dir}/${f}" ]; then lockfile="${dir}/${f}"; break; fi
+            done
+            if [ -z "${lockfile}" ]; then
+              echo "::error::No lockfile (package-lock.json, pnpm-lock.yaml or yarn.lock) in '${dir}'. Commit it; for a workspace member, deploy it as a container instead (see the docs)."
+              exit 1
+            fi
+            pm_field=$(jq -r '.packageManager // ""' "${pkg}")
+            pnpm_ver=""
+            case "${lockfile##*/}" in
+              package-lock.json|npm-shrinkwrap.json)
+                pm=npm; install="npm ci"; prod="npm ci --omit=dev" ;;
+              pnpm-lock.yaml)
+                pm=pnpm; install="pnpm install --frozen-lockfile"
+                # Hoisted: real folders instead of pnpm's symlinks, which zip deploy can break.
+                prod="pnpm install --prod --frozen-lockfile --config.node-linker=hoisted"
+                if [[ "${pm_field}" != pnpm@* ]]; then pnpm_ver="${PNPM_VERSION}"; fi ;;
+              yarn.lock)
+                if grep -q '^__metadata:' "${lockfile}"; then
+                  if ! grep -qE '^nodeLinker:[[:space:]]*"?node-modules' "${dir}/.yarnrc.yml" 2> /dev/null; then
+                    echo "::error::Yarn Plug'n'Play isn't supported on App Service. Add 'nodeLinker: node-modules' to ${dir}/.yarnrc.yml."
+                    exit 1
+                  fi
+                  pm=yarn-berry; install="yarn install --immutable"
+                  prod="yarn workspaces focus --all --production"
+                else
+                  pm=yarn; install="yarn install --frozen-lockfile"
+                  prod="yarn install --frozen-lockfile --production"
+                fi ;;
+            esac
+            build=""
+            if jq -e --arg s "${BUILD_SCRIPT}" '.scripts[$s]' "${pkg}" > /dev/null; then
+              build="${BUILD_SCRIPT}"
+            else
+              echo "::notice::No \"${BUILD_SCRIPT}\" script in ${pkg}; deploying without a build step."
+            fi
+            if ! jq -e '.scripts.start' "${pkg}" > /dev/null && [ -z "${STARTUP_COMMAND}" ]; then
+              echo "::warning::${pkg} has no \"start\" script. App Service starts Node apps with npm start; add one or set STARTUP_COMMAND."
+            fi
+            node_ver=""; node_file=""
+            if [ -n "${NODE_VERSION}" ]; then
+              node_ver="${NODE_VERSION}"
+            else
+              for f in "${dir}/.nvmrc" "${dir}/.node-version"; do
+                if [ -f "${f}" ]; then node_file="${f}"; break; fi
+              done
+              if [ -z "${node_file}" ] && jq -e '.volta.node // .devEngines.runtime // .engines.node // empty' "${pkg}" > /dev/null; then
+                node_file="${pkg}"
+              fi
+              if [ -z "${node_file}" ]; then
+                node_ver="lts/*"
+                echo "::notice::No Node version set (NODE_VERSION, .nvmrc, .node-version or package.json engines); using the latest LTS. Match it to the Web App's runtime."
+              fi
+            fi
+            out+=("lockfile=${lockfile}" "pm=${pm}" "install=${install}" "prod_install=${prod}"
+                  "pnpm_version=${pnpm_ver}" "build_script=${build}"
+                  "node_version=${node_ver}" "node_file=${node_file}")
+            echo "Stack: Node | ${pm} (${lockfile}) | Node: ${node_ver:-from ${node_file}} | build: ${build:-none}"
+          fi
+
+          # Deploy: on the default branch (push or manual run), when APP_NAME is set.
+          deploy=false
+          if [[ "${EVENT}" =~ ^(push|workflow_dispatch)$ ]] && [ "${GITHUB_REF}" = "refs/heads/${DEFAULT_BRANCH}" ]; then
+            if [ -n "${APP_NAME}" ]; then
+              deploy=true
+            else
+              echo "::warning::Built, but not deployed: set APP_NAME (and the AZURE_* variables)."
+            fi
+          fi
+          if [ "${deploy}" = true ] && [ -z "${ENVIRONMENT}" ]; then
+            echo "::error::ENVIRONMENT can't be empty."; exit 1
+          fi
+          echo "Deploy: ${deploy}${APP_NAME:+ | app: ${APP_NAME}}"
+
+          slug=$(printf '%s' "${dir}" | tr -c 'A-Za-z0-9._-' '-')
+          {
+            echo "found=true"
+            echo "dir=${dir}"
+            echo "stack=${kind}"
+            printf '%s\n' "${out[@]}"
+            echo "deploy=${deploy}"
+            echo "app_name=${APP_NAME}"
+            echo "environment=${ENVIRONMENT}"
+            echo "artifact=webapp-package-${slug}"
+          } >> "$GITHUB_OUTPUT"
+
+      # .NET
+      - name: Set up .NET
+        if: steps.detect.outputs.stack == 'dotnet'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: ${{ steps.detect.outputs.dotnet_version }}
+          global-json-file: ${{ steps.detect.outputs.global_json }}
+
+      - name: Cache NuGet packages
+        if: steps.detect.outputs.stack == 'dotnet'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.fsproj', '**/*.props', '**/*.targets', '**/packages.lock.json', '**/global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Publish
+        if: steps.detect.outputs.stack == 'dotnet'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          PROJECT: ${{ steps.detect.outputs.project }}
+          OUT: ${{ runner.temp }}/webapp
+        run: dotnet publish "${PROJECT}" --configuration Release --output "${OUT}"
+
+      # Node
+      - name: Set up Node
+        if: steps.detect.outputs.stack == 'node'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.detect.outputs.node_version }}
+          node-version-file: ${{ steps.detect.outputs.node_file }}
+          # pnpm caches its own store (next step); Yarn 2+ isn't cached.
+          cache: ${{ (steps.detect.outputs.pm == 'npm' || steps.detect.outputs.pm == 'yarn') && steps.detect.outputs.pm || '' }}
+          cache-dependency-path: ${{ steps.detect.outputs.lockfile }}
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        if: steps.detect.outputs.pm == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ steps.detect.outputs.pnpm_version }}
+          package_json_file: ${{ steps.detect.outputs.dir }}/package.json
+          cache: true
+          cache_dependency_path: ${{ steps.detect.outputs.lockfile }}
+
+      - name: Enable Corepack (Yarn 2+)
+        if: steps.detect.outputs.pm == 'yarn-berry'
+        run: |
+          npm install --global corepack@0.36.0
+          corepack enable
+
+      - name: Install dependencies
+        if: steps.detect.outputs.stack == 'node'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          INSTALL: ${{ steps.detect.outputs.install }}
+        run: |
+          # shellcheck disable=SC2086  # unquoted on purpose: the command has arguments
+          ${INSTALL}
+
+      - name: Build
+        if: steps.detect.outputs.build_script != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          PM: ${{ steps.detect.outputs.pm }}
+          SCRIPT: ${{ steps.detect.outputs.build_script }}
+        run: |
+          case "${PM}" in
+            npm) npm run "${SCRIPT}" ;;
+            pnpm) pnpm run "${SCRIPT}" ;;
+            *) yarn run "${SCRIPT}" ;;
+          esac
+
+      # Fresh node_modules with production dependencies only, then the app folder is copied
+      # without the repo's metadata and local env files.
+      - name: Prepare Node package
+        if: steps.detect.outputs.stack == 'node'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          PROD_INSTALL: ${{ steps.detect.outputs.prod_install }}
+          OUT: ${{ runner.temp }}/webapp
+        run: |
+          set -euo pipefail
+          rm -rf ./node_modules
+          # shellcheck disable=SC2086  # unquoted on purpose: the command has arguments
+          ${PROD_INSTALL}
+          mkdir -p "${OUT}"
+          tar --create \
+            --exclude=./.git --exclude=./.github --exclude=./node_modules/.cache \
+            --exclude='./.env' --exclude='./.env.*local' \
+            --file - . | tar --extract --directory "${OUT}" --file -
+
+      - name: Zip package
+        id: package
+        if: steps.detect.outputs.found == 'true'
+        env:
+          OUT: ${{ runner.temp }}/webapp
+          ZIP: ${{ runner.temp }}/webapp.zip
+        run: |
+          set -euo pipefail
+          if [ -z "$(ls -A "${OUT}")" ]; then
+            echo "::error::The package is empty."
+            exit 1
+          fi
+          (cd "${OUT}" && zip --quiet --recurse-paths --symlinks "${ZIP}" .)
+          echo "Package: $(find "${OUT}" -type f | wc -l | tr -d ' ') files, $(du -sh "${ZIP}" | cut -f1) zipped"
+          echo "size=$(du -sh "${ZIP}" | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "files=$(find "${OUT}" -type f | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload package
+        if: steps.detect.outputs.deploy == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.detect.outputs.artifact }}
+          path: ${{ runner.temp }}/webapp.zip
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0   # already a zip
+
+      - name: Summary
+        if: always() && steps.detect.outputs.found == 'true'
+        env:
+          STACK: ${{ steps.detect.outputs.stack }}
+          SIZE: ${{ steps.package.outputs.size }}
+          FILES: ${{ steps.package.outputs.files }}
+          DEPLOY: ${{ steps.detect.outputs.deploy }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          {
+            echo "### Web App build"
+            echo
+            if [ -n "${SIZE}" ]; then
+              echo "Package (${STACK}): ${FILES} files, ${SIZE} zipped."
+            else
+              echo "The build didn't finish; see the log."
+            fi
+            echo
+            if [ "${DEPLOY}" = true ]; then
+              echo "Deploying to production."
+            elif [ "${EVENT}" = pull_request ]; then
+              echo "Pull request: built only, not deployed."
+            else
+              echo "Not deployed (only pushes and manual runs on the default branch deploy; see the warnings)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to App Service
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write   # Azure login (OIDC)
+    environment:
+      name: ${{ needs.build.outputs.environment }}
+      url: ${{ steps.deploy.outputs.webapp-url }}
+    # One deploy at a time per app; a newer one waits instead of cancelling a running one.
+    concurrency:
+      group: webapp-deploy-${{ github.repository }}-${{ needs.build.outputs.app_name }}
+      cancel-in-progress: false
+    outputs:
+      url: ${{ steps.deploy.outputs.webapp-url }}
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: ${{ runner.temp }}
+
+      # Shared with the other Azure deploys: checks the AZURE_* values, then azure/login.
+      - name: Log in to Azure
+        uses: rubone/shared-workflows/actions/azure-login@v1
+        with:
+          client-id: ${{ inputs.azure_client_id || env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ inputs.azure_tenant_id || env.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy
+        id: deploy
+        uses: azure/webapps-deploy@02a81bead70021f5284939794bcec79c271ab383 # v3.0.8
+        with:
+          app-name: ${{ needs.build.outputs.app_name }}
+          resource-group-name: ${{ inputs.resource_group || env.RESOURCE_GROUP }}
+          package: ${{ runner.temp }}/webapp.zip
+          startup-command: ${{ inputs.startup_command || env.STARTUP_COMMAND }}
+
+      - name: Health check
+        id: health
+        if: inputs.health_check_path != '' || env.HEALTH_CHECK_PATH != ''
+        env:
+          URL: ${{ steps.deploy.outputs.webapp-url }}
+          HEALTH_PATH: ${{ inputs.health_check_path || env.HEALTH_CHECK_PATH }}
+        run: |
+          set -uo pipefail
+          target="${URL%/}/${HEALTH_PATH#/}"
+          # The app restarts after a deploy: up to 5 minutes for it to answer.
+          for i in $(seq 1 20); do
+            code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 --location "${target}")
+            echo "Attempt ${i}: HTTP ${code}"
+            if [ "${code}" -ge 200 ] && [ "${code}" -lt 400 ]; then
+              echo "${target} answered HTTP ${code}."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::${target} didn't answer with a 2xx or 3xx status within 5 minutes. Check the app's log stream in the portal (Monitoring → Log stream)."
+          exit 1
+
+      - name: Summary
+        if: always()
+        env:
+          URL: ${{ steps.deploy.outputs.webapp-url }}
+          ENVIRONMENT: ${{ needs.build.outputs.environment }}
+          APP: ${{ needs.build.outputs.app_name }}
+          DEPLOYED: ${{ steps.deploy.outcome }}
+          HEALTH: ${{ steps.health.outcome }}
+        run: |
+          {
+            echo "### Web App deploy"
+            echo
+            echo "App: \`${APP}\` · environment \`${ENVIRONMENT}\` · deploy: ${DEPLOYED}${HEALTH:+ · health check: ${HEALTH}}"
+            [ -n "${URL}" ] && echo && echo "${URL}"
+          } >> "$GITHUB_STEP_SUMMARY"

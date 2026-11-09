@@ -40,6 +40,15 @@ changes to inputs, secrets or behavior require a new major version.
   `AZURE_STATIC_WEB_APPS_API_TOKEN` secret. The deploy job runs in a GitHub environment
   (`production`). Uses `Azure/static-web-apps-deploy` v1 pinned by SHA. Copy and call modes.
 - `tests/fixtures/static-web`: dependency-free static site for the self-test.
+- `azure-webapp-deploy.yml`: builds a .NET app (`dotnet publish` of the only web project, SDK
+  from `global.json`) or a Node app (npm, pnpm, Yarn; build script, then production
+  dependencies only, without `.env` files) into a zip and deploys it to Azure App Service with
+  `azure/webapps-deploy` v3.0.8 pinned by SHA, on pushes to the default branch and manual
+  runs. PRs only build. Signs in with the `azure-login` action; the deploy job runs in a
+  GitHub environment (`production`). Optional health check after the deploy. Copy and call
+  modes.
+- `tests/fixtures/dotnet-web` and `tests/fixtures/node-web`: minimal ASP.NET and Node web apps
+  without dependencies, for the self-test.
 - `actions/azure-login`: first composite action. Checks the `AZURE_*` values (set, GUIDs) and
   the job's `id-token: write` permission with clear errors, then runs `azure/login` (OIDC).
   The Azure deploys reference it as `rubone/shared-workflows/actions/azure-login@v1` in both

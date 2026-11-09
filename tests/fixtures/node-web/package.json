@@ -1,0 +1,11 @@
+{
+  "name": "fixture-node-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture for azure-webapp-deploy.yml's self-test. No dependencies.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node server.mjs"
+  }
+}
