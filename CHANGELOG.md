@@ -32,6 +32,18 @@ changes to inputs, secrets or behavior require a new major version.
   scanning when available, and summarizes the findings in the job. Honors `.trivyignore`.
   Outputs the counts. Copy and call modes.
 - `docker-build-push` docs link to `trivy-scan`.
+- `azure-static-web-apps-deploy.yml`: builds a frontend with its package manager (npm,
+  pnpm, Yarn; Node version from `.nvmrc` or `package.json`, as in `node-ci`), finds the output
+  folder (Angular, Vite, CRA, Next.js export) and deploys it to Azure Static Web Apps on
+  pushes to the default branch and manual runs. PRs only build. Authenticates with OIDC
+  (the `azure-login` action, then the deployment token read with the Azure CLI) or with the
+  `AZURE_STATIC_WEB_APPS_API_TOKEN` secret. The deploy job runs in a GitHub environment
+  (`production`). Uses `Azure/static-web-apps-deploy` v1 pinned by SHA. Copy and call modes.
+- `tests/fixtures/static-web`: dependency-free static site for the self-test.
+- `actions/azure-login`: first composite action. Checks the `AZURE_*` values (set, GUIDs) and
+  the job's `id-token: write` permission with clear errors, then runs `azure/login` (OIDC).
+  The Azure deploys reference it as `rubone/shared-workflows/actions/azure-login@v1` in both
+  modes, so `v1` must be moved to a release that includes it before they can sign in.
 
 ## [1.0.0] - 2026-11-05
 

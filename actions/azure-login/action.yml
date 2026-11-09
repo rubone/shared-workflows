@@ -1,0 +1,74 @@
+# Azure login with OpenID Connect: checks the values and the job's id-token permission with
+# clear errors, then signs in with azure/login. No stored secret.
+#
+#   - uses: rubone/shared-workflows/actions/azure-login@v1
+#     with:
+#       client-id: ${{ vars.AZURE_CLIENT_ID }}
+#       tenant-id: ${{ vars.AZURE_TENANT_ID }}
+#       subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+#
+# The job needs `permissions: id-token: write`. Afterwards the Azure CLI (`az`) is signed in
+# for the rest of the job.
+#
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/azure-login.md
+name: Azure login (OIDC)
+description: Checks the Azure values and signs in to Azure with OpenID Connect, without stored secrets.
+author: rubone
+branding:
+  icon: log-in
+  color: blue
+
+inputs:
+  client-id:
+    description: Client ID of the managed identity or app registration with the federated credential.
+    required: false
+    default: ''
+  tenant-id:
+    description: Microsoft Entra tenant ID.
+    required: false
+    default: ''
+  subscription-id:
+    description: Azure subscription ID.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Check Azure values
+      shell: bash
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        TENANT_ID: ${{ inputs.tenant-id }}
+        SUB_ID: ${{ inputs.subscription-id }}
+      run: |
+        set -euo pipefail
+        missing=()
+        [ -n "${CLIENT_ID}" ] || missing+=(AZURE_CLIENT_ID)
+        [ -n "${TENANT_ID}" ] || missing+=(AZURE_TENANT_ID)
+        [ -n "${SUB_ID}" ] || missing+=(AZURE_SUBSCRIPTION_ID)
+        if [ "${#missing[@]}" -gt 0 ]; then
+          echo "::error title=Azure login::Missing ${missing[*]}. Add them as repository variables (Settings → Secrets and variables → Actions → Variables), or pass them as inputs."
+          exit 1
+        fi
+        uuid='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        bad=()
+        [[ "${CLIENT_ID}" =~ ${uuid} ]] || bad+=(AZURE_CLIENT_ID)
+        [[ "${TENANT_ID}" =~ ${uuid} ]] || bad+=(AZURE_TENANT_ID)
+        [[ "${SUB_ID}" =~ ${uuid} ]] || bad+=(AZURE_SUBSCRIPTION_ID)
+        if [ "${#bad[@]}" -gt 0 ]; then
+          echo "::error title=Azure login::${bad[*]} must be a GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). Use the IDs, not names: for AZURE_CLIENT_ID, the identity's client ID (not its object ID)."
+          exit 1
+        fi
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "::error title=Azure login::The job can't request an OIDC token. Add 'id-token: write' to the job's permissions (and to the caller's job in call mode). Pull requests from forks never get one."
+          exit 1
+        fi
+        echo "Signing in to tenant ${TENANT_ID}, subscription ${SUB_ID}, as client ${CLIENT_ID}."
+
+    - name: Sign in to Azure
+      uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      with:
+        client-id: ${{ inputs.client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}

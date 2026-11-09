@@ -1,0 +1,475 @@
+# Azure Static Web Apps deploy: builds a frontend (React, Angular, Vue, Svelte, static
+# Next.js...) with the project's package manager and deploys the output to Azure Static
+# Web Apps. PRs only build; pushes to the default branch (and manual runs on it) deploy
+# to production.
+#
+# Detected from the project, nothing to set in most repos:
+#   - Package manager, from the lockfile: npm, pnpm, Yarn 1 or Yarn 2+.
+#   - Node version: NODE_VERSION, else .nvmrc / .node-version, else package.json
+#     (volta, devEngines, engines), else the latest LTS.
+#   - Output folder: dist/<app>/browser (Angular), dist, build or out, whichever has an
+#     index.html. staticwebapp.config.json is copied there if the build left it out.
+# Without a package.json, it skips with a warning (run stays green).
+#
+# Authentication, either:
+#   - OpenID Connect (no stored secret): an identity with Contributor on the Static Web
+#     App, the AZURE_* repository variables and APP_NAME. Each run signs in with the
+#     rubone/shared-workflows/actions/azure-login action (also in copy mode, so the
+#     organization must allow actions from rubone/shared-workflows) and fetches the
+#     deployment token with the Azure CLI.
+#   - The deployment token in the AZURE_STATIC_WEB_APPS_API_TOKEN secret. Used when set.
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below (at least APP_NAME for OIDC).
+#      The pull_request / push triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        swa:
+#          permissions: { contents: read, id-token: write }
+#          uses: rubone/shared-workflows/.github/workflows/azure-static-web-apps-deploy.yml@v1
+#          with:
+#            app_name: my-frontend
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/azure-static-web-apps-deploy.md
+name: Static Web App deploy
+
+on:
+  # A) Copy mode triggers.
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder with the frontend's package.json, relative to the repo root. Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      node_version:
+        description: "Node version (e.g. '24'). Empty = from .nvmrc, .node-version or package.json. Overrides env.NODE_VERSION."
+        type: string
+        required: false
+        default: ''
+      build_script:
+        description: "package.json script that builds the site. Overrides env.BUILD_SCRIPT."
+        type: string
+        required: false
+        default: ''
+      output_location:
+        description: "Build output folder, relative to working_directory. Empty = detect. Overrides env.OUTPUT_LOCATION."
+        type: string
+        required: false
+        default: ''
+      app_name:
+        description: "Name of the Static Web App resource in Azure (OIDC). Overrides env.APP_NAME."
+        type: string
+        required: false
+        default: ''
+      resource_group:
+        description: "Resource group of the Static Web App. Empty = found by name. Overrides env.RESOURCE_GROUP."
+        type: string
+        required: false
+        default: ''
+      environment:
+        description: "GitHub environment of the deploy job. Overrides env.ENVIRONMENT."
+        type: string
+        required: false
+        default: ''
+      azure_client_id:
+        description: "Client ID of the identity with Contributor on the Static Web App. Overrides env.AZURE_CLIENT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_tenant_id:
+        description: "Microsoft Entra tenant ID. Overrides env.AZURE_TENANT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_subscription_id:
+        description: "Azure subscription ID. Overrides env.AZURE_SUBSCRIPTION_ID."
+        type: string
+        required: false
+        default: ''
+    secrets:
+      AZURE_STATIC_WEB_APPS_API_TOKEN:
+        description: "Deployment token of the Static Web App. When set, used instead of OIDC."
+        required: false
+    outputs:
+      url:
+        description: "URL of the deployed site (empty when nothing was deployed)."
+        value: ${{ jobs.deploy.outputs.url }}
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder with package.json, relative to the repo root ('.' = root).
+  WORKING_DIRECTORY: '.'
+  # Node version. Empty = .nvmrc / .node-version / package.json, else the latest LTS.
+  NODE_VERSION: ''
+  # pnpm only, used when package.json has no "packageManager": "pnpm@x.y.z" field.
+  PNPM_VERSION: '10'
+  # package.json script that builds the site.
+  BUILD_SCRIPT: 'build'
+  # Build output, relative to WORKING_DIRECTORY. Empty = the first of dist/<app>/browser,
+  # dist, build, out that has an index.html.
+  OUTPUT_LOCATION: ''
+  # The Static Web App resource (OIDC). Not needed with the AZURE_STATIC_WEB_APPS_API_TOKEN
+  # secret.
+  APP_NAME: ''
+  RESOURCE_GROUP: ''
+  # GitHub environment of the deploy job: shows the URL and deploy history in the repo, and
+  # can require approvals. The OIDC federated credential must match it (see the docs).
+  ENVIRONMENT: 'production'
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      deploy: ${{ steps.detect.outputs.deploy }}
+      auth: ${{ steps.detect.outputs.auth }}
+      app_name: ${{ steps.detect.outputs.app_name }}
+      resource_group: ${{ steps.detect.outputs.resource_group }}
+      environment: ${{ steps.detect.outputs.environment }}
+      artifact: ${{ steps.detect.outputs.artifact }}
+    concurrency:
+      group: swa-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.working_directory }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect project
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          NODE_VERSION: ${{ inputs.node_version || env.NODE_VERSION }}
+          BUILD_SCRIPT: ${{ inputs.build_script || env.BUILD_SCRIPT }}
+          APP_NAME: ${{ inputs.app_name || env.APP_NAME }}
+          RESOURCE_GROUP: ${{ inputs.resource_group || env.RESOURCE_GROUP }}
+          ENVIRONMENT: ${{ inputs.environment || env.ENVIRONMENT }}
+          HAS_TOKEN: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN != '' }}
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"
+          dir="${dir#./}"
+          dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a folder inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          pkg="${dir}/package.json"
+          if [ ! -f "${pkg}" ]; then
+            echo "::warning::No package.json in '${dir}'; skipping the Static Web App build. If the frontend is in a subfolder, set WORKING_DIRECTORY."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          jq empty "${pkg}" 2> /dev/null || { echo "::error::${pkg} isn't valid JSON."; exit 1; }
+          if ! jq -e --arg s "${BUILD_SCRIPT}" '.scripts[$s]' "${pkg}" > /dev/null; then
+            echo "::error::${pkg} has no \"${BUILD_SCRIPT}\" script. Set BUILD_SCRIPT to the script that builds the site."
+            exit 1
+          fi
+
+          # Lockfile: in the project folder or, for workspaces, in a parent folder.
+          lockfile=""
+          d="${dir}"
+          while :; do
+            for f in package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock; do
+              if [ -f "${d}/${f}" ]; then lockfile="${d}/${f}"; break 2; fi
+            done
+            [ "${d}" = "." ] && break
+            d=$(dirname "${d}")
+          done
+          if [ -z "${lockfile}" ]; then
+            echo "::error::No lockfile (package-lock.json, pnpm-lock.yaml or yarn.lock) in '${dir}' or its parent folders. Commit it, so CI builds with the same versions as your machine."
+            exit 1
+          fi
+          root=$(dirname "${lockfile}")
+          root_pkg="${root}/package.json"
+          [ -f "${root_pkg}" ] || root_pkg="${pkg}"
+          pm_field=$(jq -r '.packageManager // ""' "${root_pkg}")
+          pnpm_ver=""
+          case "${lockfile##*/}" in
+            package-lock.json|npm-shrinkwrap.json) pm=npm; install="npm ci" ;;
+            pnpm-lock.yaml)
+              pm=pnpm; install="pnpm install --frozen-lockfile"
+              if [[ "${pm_field}" != pnpm@* ]]; then pnpm_ver="${PNPM_VERSION}"; fi ;;
+            yarn.lock)
+              if grep -q '^__metadata:' "${lockfile}"; then
+                pm=yarn-berry; install="yarn install --immutable"
+              else
+                pm=yarn; install="yarn install --frozen-lockfile"
+              fi ;;
+          esac
+
+          node_ver=""; node_file=""
+          if [ -n "${NODE_VERSION}" ]; then
+            node_ver="${NODE_VERSION}"
+          else
+            for f in "${dir}/.nvmrc" "${dir}/.node-version" "${root}/.nvmrc" "${root}/.node-version"; do
+              if [ -f "${f}" ]; then node_file="${f}"; break; fi
+            done
+            if [ -z "${node_file}" ] && jq -e '.volta.node // .devEngines.runtime // .engines.node // empty' "${pkg}" > /dev/null; then
+              node_file="${pkg}"
+            fi
+            if [ -z "${node_file}" ]; then
+              node_ver="lts/*"
+              echo "::notice::No Node version set (NODE_VERSION, .nvmrc, .node-version or package.json engines); using the latest LTS."
+            fi
+          fi
+
+          # Deploy: on the default branch (push or manual run), with a way to authenticate.
+          deploy=false; auth=''
+          if [[ "${EVENT}" =~ ^(push|workflow_dispatch)$ ]] && [ "${GITHUB_REF}" = "refs/heads/${DEFAULT_BRANCH}" ]; then
+            if [ "${HAS_TOKEN}" = true ]; then
+              deploy=true; auth=token
+            elif [ -n "${APP_NAME}" ]; then
+              deploy=true; auth=oidc   # the azure-login action checks the AZURE_* values
+            else
+              echo "::warning::Built, but not deployed: set APP_NAME (and the AZURE_* variables) for OIDC, or add the AZURE_STATIC_WEB_APPS_API_TOKEN secret."
+            fi
+          fi
+          if [ "${deploy}" = true ] && [ -z "${ENVIRONMENT}" ]; then
+            echo "::error::ENVIRONMENT can't be empty."; exit 1
+          fi
+
+          slug=$(printf '%s' "${dir}" | tr -c 'A-Za-z0-9._-' '-')
+          {
+            echo "found=true"
+            echo "dir=${dir}"
+            echo "lockfile=${lockfile}"
+            echo "root=${root}"
+            echo "root_pkg=${root_pkg}"
+            echo "pm=${pm}"
+            echo "install=${install}"
+            echo "pnpm_version=${pnpm_ver}"
+            echo "node_version=${node_ver}"
+            echo "node_file=${node_file}"
+            echo "build_script=${BUILD_SCRIPT}"
+            echo "deploy=${deploy}"
+            echo "auth=${auth}"
+            echo "app_name=${APP_NAME}"
+            echo "resource_group=${RESOURCE_GROUP}"
+            echo "environment=${ENVIRONMENT}"
+            echo "artifact=swa-site-${slug}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Project: ${dir} | ${pm} (${lockfile}) | Node: ${node_ver:-from ${node_file}} | script: ${BUILD_SCRIPT}"
+          echo "Deploy: ${deploy}${auth:+ (${auth})}${APP_NAME:+ | app: ${APP_NAME}}"
+
+      - name: Set up Node
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.detect.outputs.node_version }}
+          node-version-file: ${{ steps.detect.outputs.node_file }}
+          # pnpm caches its own store (next step); Yarn 2+ isn't cached.
+          cache: ${{ (steps.detect.outputs.pm == 'npm' || steps.detect.outputs.pm == 'yarn') && steps.detect.outputs.pm || '' }}
+          cache-dependency-path: ${{ steps.detect.outputs.lockfile }}
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        if: steps.detect.outputs.pm == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ steps.detect.outputs.pnpm_version }}
+          package_json_file: ${{ steps.detect.outputs.root_pkg }}
+          cache: true
+          cache_dependency_path: ${{ steps.detect.outputs.lockfile }}
+
+      - name: Enable Corepack (Yarn 2+)
+        if: steps.detect.outputs.pm == 'yarn-berry'
+        run: |
+          npm install --global corepack@0.36.0
+          corepack enable
+
+      - name: Install dependencies
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.root }}
+        env:
+          INSTALL: ${{ steps.detect.outputs.install }}
+        run: |
+          # shellcheck disable=SC2086  # unquoted on purpose: the command has arguments
+          ${INSTALL}
+
+      - name: Build
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          PM: ${{ steps.detect.outputs.pm }}
+          SCRIPT: ${{ steps.detect.outputs.build_script }}
+        run: |
+          case "${PM}" in
+            npm) npm run "${SCRIPT}" ;;
+            pnpm) pnpm run "${SCRIPT}" ;;
+            *) yarn run "${SCRIPT}" ;;
+          esac
+
+      - name: Find output
+        id: output
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          OUTPUT_LOCATION: ${{ inputs.output_location || env.OUTPUT_LOCATION }}
+          DIR: ${{ steps.detect.outputs.dir }}
+        run: |
+          set -euo pipefail
+          out=''
+          if [ -n "${OUTPUT_LOCATION}" ]; then
+            out="${OUTPUT_LOCATION%/}"; out="${out#./}"
+            if [[ "${out}" == /* || "/${out}/" == */../* ]] || [ ! -d "${out}" ]; then
+              echo "::error::OUTPUT_LOCATION '${OUTPUT_LOCATION}' isn't a folder inside '${DIR}' after the build."
+              exit 1
+            fi
+            [ -f "${out}/index.html" ] || echo "::warning::No index.html in '${out}'; the site root will return 404 unless staticwebapp.config.json routes it."
+          else
+            # Angular (dist/<app>/browser) first, then dist itself, older Angular (dist/<app>)
+            # and the other usual folders.
+            for c in dist/*/browser dist dist/* build out; do
+              if [ -f "${c}/index.html" ]; then out="${c}"; break; fi
+            done
+            if [ -z "${out}" ]; then
+              echo "::error::No index.html in dist/<app>/browser, dist, build or out after the build. Set OUTPUT_LOCATION to the folder the build writes to."
+              exit 1
+            fi
+          fi
+          # Routes, headers and auth rules: Static Web Apps reads them from the deployed folder.
+          if [ ! -f "${out}/staticwebapp.config.json" ] && [ -f staticwebapp.config.json ]; then
+            cp staticwebapp.config.json "${out}/"
+            echo "Copied staticwebapp.config.json into ${out}/."
+          fi
+          echo "path=${DIR}/${out}" >> "$GITHUB_OUTPUT"
+          echo "Output: ${DIR}/${out} ($(find "${out}" -type f | wc -l | tr -d ' ') files, $(du -sh "${out}" | cut -f1))"
+
+      - name: Upload site
+        if: steps.detect.outputs.deploy == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.detect.outputs.artifact }}
+          path: ${{ steps.output.outputs.path }}
+          include-hidden-files: true   # e.g. .well-known/
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Summary
+        if: always() && steps.detect.outputs.found == 'true'
+        env:
+          OUT: ${{ steps.output.outputs.path }}
+          DEPLOY: ${{ steps.detect.outputs.deploy }}
+          AUTH: ${{ steps.detect.outputs.auth }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          {
+            echo "### Static Web App build"
+            echo
+            if [ -n "${OUT}" ] && [ -d "${OUT}" ]; then
+              echo "Output: \`${OUT}\` ($(find "${OUT}" -type f | wc -l | tr -d ' ') files, $(du -sh "${OUT}" | cut -f1))"
+            else
+              echo "The build didn't finish; see the log."
+            fi
+            echo
+            if [ "${DEPLOY}" = true ]; then
+              echo "Deploying to production (${AUTH})."
+            elif [ "${EVENT}" = pull_request ]; then
+              echo "Pull request: built only, not deployed."
+            else
+              echo "Not deployed (only pushes and manual runs on the default branch deploy; see the warnings)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to Static Web Apps
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write   # Azure login (OIDC)
+    environment:
+      name: ${{ needs.build.outputs.environment }}
+      url: ${{ steps.deploy.outputs.static_web_app_url }}
+    # One deploy at a time per app; a newer one waits instead of cancelling a running one.
+    concurrency:
+      group: swa-deploy-${{ github.repository }}-${{ needs.build.outputs.app_name || needs.build.outputs.artifact }}
+      cancel-in-progress: false
+    outputs:
+      url: ${{ steps.deploy.outputs.static_web_app_url }}
+    steps:
+      - name: Download site
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: swa-site
+
+      # Shared with the other Azure deploys: checks the AZURE_* values, then azure/login.
+      - name: Log in to Azure
+        if: needs.build.outputs.auth == 'oidc'
+        uses: rubone/shared-workflows/actions/azure-login@v1
+        with:
+          client-id: ${{ inputs.azure_client_id || env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ inputs.azure_tenant_id || env.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || env.AZURE_SUBSCRIPTION_ID }}
+
+      # The deploy action only takes a deployment token: with OIDC, read it from Azure.
+      - name: Get deployment token
+        id: token
+        if: needs.build.outputs.auth == 'oidc'
+        env:
+          APP: ${{ needs.build.outputs.app_name }}
+          RG: ${{ needs.build.outputs.resource_group }}
+        run: |
+          set -euo pipefail
+          args=(--name "${APP}" --query properties.apiKey --output tsv)
+          [ -n "${RG}" ] && args+=(--resource-group "${RG}")
+          if ! token=$(az staticwebapp secrets list "${args[@]}") || [ -z "${token}" ]; then
+            echo "::error::Couldn't read the deployment token of Static Web App '${APP}'. Check APP_NAME (and RESOURCE_GROUP), and that the identity has the Contributor role on it."
+            exit 1
+          fi
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+
+      # Uploads the already-built site (no Oryx build). The action runs Microsoft's
+      # mcr.microsoft.com/appsvc/staticappsclient:stable image.
+      - name: Deploy
+        id: deploy
+        uses: Azure/static-web-apps-deploy@1a947af9992250f3bc2e68ad0754c0b0c11566c9 # v1
+        with:
+          action: upload
+          azure_static_web_apps_api_token: ${{ steps.token.outputs.token || secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          app_location: swa-site
+          api_location: ''
+          output_location: ''
+          skip_app_build: true
+
+      - name: Summary
+        env:
+          URL: ${{ steps.deploy.outputs.static_web_app_url }}
+          ENVIRONMENT: ${{ needs.build.outputs.environment }}
+        run: |
+          {
+            echo "### Static Web App deployed"
+            echo
+            echo "Environment: \`${ENVIRONMENT}\` · ${URL:-URL not reported}"
+          } >> "$GITHUB_STEP_SUMMARY"
