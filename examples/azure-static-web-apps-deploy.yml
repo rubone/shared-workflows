@@ -1,0 +1,34 @@
+# Call mode: copy to .github/workflows/azure-static-web-apps-deploy.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy
+# .github/workflows/azure-static-web-apps-deploy.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/azure-static-web-apps-deploy.md
+name: Static Web App deploy
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  swa:
+    permissions:
+      contents: read
+      id-token: write   # OIDC login to Azure
+    uses: rubone/shared-workflows/.github/workflows/azure-static-web-apps-deploy.yml@v1
+    with:
+      working_directory: '.'          # folder with package.json
+      app_name: 'my-frontend'         # the Static Web App resource (OIDC)
+      resource_group: ''              # empty = found by name
+      output_location: ''             # empty = dist/<app>/browser, dist, build or out
+      environment: 'production'       # GitHub environment of the deploy job
+      # azure_client_id / azure_tenant_id / azure_subscription_id default to the
+      # AZURE_* repository variables.
+    # Instead of OIDC, with the deployment token in a secret:
+    # secrets:
+    #   AZURE_STATIC_WEB_APPS_API_TOKEN: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}

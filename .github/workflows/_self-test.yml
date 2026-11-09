@@ -284,3 +284,73 @@ jobs:
             echo "::error::Expected CRITICAL and HIGH findings and nothing blocking (fail_on: none)."
             exit 1
           fi
+
+  # Smoke test of call mode on tests/fixtures/static-web (npm, .nvmrc, a
+  # staticwebapp.config.json outside the build output), plus the repo root, which has no
+  # package.json and must skip with a warning. PRs only build: the deploy job is skipped.
+  azure-static-web-apps-deploy:
+    name: Static Web App (smoke test, ${{ matrix.project }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - tests/fixtures/static-web
+          - .
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/azure-static-web-apps-deploy.yml
+    with:
+      working_directory: ${{ matrix.project }}
+
+  # The azure-login action's checks, from this branch (./actions): missing values and IDs
+  # that aren't GUIDs must fail before azure/login runs. A real sign-in needs an Azure
+  # identity, so it's not tested here.
+  azure-login-checks:
+    name: azure-login (checks, ${{ matrix.case }})
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: missing values
+            client: ''
+            tenant: ''
+            subscription: ''
+          - case: not a GUID
+            client: my-identity
+            tenant: 00000000-0000-0000-0000-000000000000
+            subscription: 00000000-0000-0000-0000-000000000000
+          - case: no id-token permission
+            client: 00000000-0000-0000-0000-000000000000
+            tenant: 00000000-0000-0000-0000-000000000000
+            subscription: 00000000-0000-0000-0000-000000000000
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run azure-login
+        id: login
+        continue-on-error: true
+        uses: ./actions/azure-login
+        with:
+          client-id: ${{ matrix.client }}
+          tenant-id: ${{ matrix.tenant }}
+          subscription-id: ${{ matrix.subscription }}
+
+      - name: Expect a failure
+        env:
+          OUTCOME: ${{ steps.login.outcome }}
+        run: |
+          if [ "${OUTCOME}" != failure ]; then
+            echo "::error::azure-login should have failed its checks (outcome: ${OUTCOME})."
+            exit 1
+          fi
+          echo "Failed as expected."
