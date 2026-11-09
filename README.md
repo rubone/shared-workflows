@@ -55,12 +55,13 @@ shared-workflows/
 | [`docker-build-push.yml`](.github/workflows/docker-build-push.yml) | Builds the Docker image with Buildx and cache, and pushes it to GHCR or ACR (OIDC, no passwords) tagged by commit, branch and semver. PRs only build. Optional multi-platform (amd64 + arm64). | [docs](docs/docker-build-push.md) | [caller](examples/docker-build-push.yml) |
 | [`trivy-scan.yml`](.github/workflows/trivy-scan.yml) | Scans the Docker image for known vulnerabilities with Trivy: on PRs (built from the Dockerfile), after each push and weekly. Fails on CRITICAL/HIGH ones with a fix; results in the Security tab. | [docs](docs/trivy-scan.md) | [caller](examples/trivy-scan.yml) |
 | [`azure-static-web-apps-deploy.yml`](.github/workflows/azure-static-web-apps-deploy.yml) | Builds a frontend (React, Angular, Vue…) with its package manager and deploys it to Azure Static Web Apps from `main`. PRs only build. OIDC (no stored secret) or the deployment token. | [docs](docs/azure-static-web-apps-deploy.md) | [caller](examples/azure-static-web-apps-deploy.yml) |
+| [`azure-webapp-deploy.yml`](.github/workflows/azure-webapp-deploy.yml) | Builds a .NET (`dotnet publish`) or Node app (production dependencies only) into a package and deploys it to Azure App Service from `main`, with an optional health check. PRs only build. OIDC, no stored secret. | [docs](docs/azure-webapp-deploy.md) | [caller](examples/azure-webapp-deploy.yml) |
 
 ## Available actions
 
 | Action | What it does | Docs |
 |---|---|---|
-| [`azure-login`](actions/azure-login/action.yml) | Signs in to Azure with OpenID Connect (no stored secret), after checking the `AZURE_*` values and the job's `id-token` permission with clear errors. Used by the Azure deploys. | [docs](docs/azure-login.md) |
+| [`azure-login`](actions/azure-login/action.yml) | Signs in to Azure with OpenID Connect (no stored secret), after checking the `AZURE_*` values and the job's `id-token` permission with clear errors. Used by the Azure deploys (Static Web Apps, Web App). | [docs](docs/azure-login.md) |
 
 ### Repo settings each workflow needs
 
@@ -83,6 +84,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `docker-build-push.yml` | GHCR: nothing. ACR: an identity with AcrPush and a federated credential, and the `AZURE_*` repository variables | GHCR free | GHCR: free quota, then billed storage |
 | `trivy-scan.yml` | The image published by `docker-build-push.yml` (same values in both). For the Security tab: **Code scanning** available. ACR: AcrPull and the `AZURE_*` variables | Free | Security tab needs GitHub Code Security; without it, job summary only |
 | `azure-static-web-apps-deploy.yml` | A Static Web App, and either an identity with Contributor on it plus `APP_NAME` and the `AZURE_*` variables (OIDC), or the `AZURE_STATIC_WEB_APPS_API_TOKEN` secret | Free plan available | Free plan available |
+| `azure-webapp-deploy.yml` | A Web App with the matching runtime, an identity with Website Contributor on it, `APP_NAME` and the `AZURE_*` variables | App Service plan | App Service plan |
 
 Recommended, though no workflow depends on them:
 

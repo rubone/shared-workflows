@@ -354,3 +354,23 @@ jobs:
             exit 1
           fi
           echo "Failed as expected."
+
+  # Smoke test of call mode: packages tests/fixtures/dotnet-web (dotnet publish) and
+  # tests/fixtures/node-web (npm, build, production-only reinstall), plus the repo root,
+  # which has neither and must skip with a warning. PRs only build: the deploy job is skipped.
+  azure-webapp-deploy:
+    name: Web App (smoke test, ${{ matrix.project }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - tests/fixtures/dotnet-web
+          - tests/fixtures/node-web
+          - .
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/azure-webapp-deploy.yml
+    with:
+      working_directory: ${{ matrix.project }}

@@ -15,8 +15,8 @@ After it, the Azure CLI (`az`) is signed in for the rest of the job.
 
 - Action: [`actions/azure-login/action.yml`](../actions/azure-login/action.yml)
 - Uses `azure/login` v3.1.0, pinned by commit SHA.
-- Used by: [azure-static-web-apps-deploy](azure-static-web-apps-deploy.md), and the upcoming
-  Web App and Container Apps deploys.
+- Used by: [azure-static-web-apps-deploy](azure-static-web-apps-deploy.md),
+  [azure-webapp-deploy](azure-webapp-deploy.md), and the upcoming Container Apps deploy.
 
 ## Usage
 
