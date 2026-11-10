@@ -1,0 +1,425 @@
+# Azure Container Apps deploy: points an existing Container App at a new image, waits for
+# the new revision to run and, optionally, checks an HTTP path. It doesn't build: it deploys
+# the image docker-build-push.yml pushed, by its sha-<commit> tag, so production runs the
+# same image that was built (and scanned by trivy-scan.yml) for that commit.
+#
+#   - After "Docker build and push" pushes from the default branch (workflow_run): deploys
+#     <registry>/<image>:sha-<commit>.
+#   - Manual run on the default branch: deploys the current commit's image, or the `tag`
+#     you enter (e.g. an older sha-<commit>, to roll back).
+#   - Call mode: the `image` input (e.g. docker-build-push's image@digest), or as above.
+#
+# Authentication: OpenID Connect, no stored secret. An identity with Container Apps
+# Contributor on the app, the AZURE_* repository variables and APP_NAME. The Container App
+# itself pulls the image: with its managed identity and AcrPull for ACR (see the docs). The
+# sign-in uses the rubone/shared-workflows/actions/azure-login action (also in copy mode, so
+# the organization must allow actions from rubone/shared-workflows).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo, next to
+#         docker-build-push.yml.
+#      2. Edit the values under `env:` below: APP_NAME, and REGISTRY, IMAGE_NAME and
+#         ACR_NAME with the same values as in docker-build-push.yml.
+#      The workflow_run / workflow_dispatch triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        docker:
+#          uses: rubone/shared-workflows/.github/workflows/docker-build-push.yml@v1
+#          ...
+#        deploy:
+#          needs: docker
+#          if: needs.docker.outputs.digest != ''
+#          permissions: { id-token: write }
+#          uses: rubone/shared-workflows/.github/workflows/azure-container-apps-deploy.yml@v1
+#          with:
+#            image: ${{ needs.docker.outputs.image }}@${{ needs.docker.outputs.digest }}
+#            app_name: my-api
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/azure-container-apps-deploy.md
+name: Container App deploy
+
+on:
+  # A) Copy mode triggers.
+  # After docker-build-push.yml pushes an image. Must match its `name:` (or 'Trivy scan',
+  # to deploy only images that passed the scan; see the docs).
+  workflow_run:
+    workflows: ['Docker build and push']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to deploy (e.g. sha-1a2b3c4 to roll back). Empty = the current commit's image."
+        type: string
+        required: false
+        default: ''
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      image:
+        description: "Full image reference (e.g. 'ghcr.io/org/app@sha256:...'). Empty = <registry>/<image_name>:sha-<commit>. Overrides env.IMAGE."
+        type: string
+        required: false
+        default: ''
+      registry:
+        description: "'ghcr' or 'acr', as in docker-build-push, to derive the image. Overrides env.REGISTRY."
+        type: string
+        required: false
+        default: ''
+      image_name:
+        description: "Image name, as in docker-build-push. Empty = the repo name. Overrides env.IMAGE_NAME."
+        type: string
+        required: false
+        default: ''
+      acr_name:
+        description: "Azure Container Registry name (without .azurecr.io) when registry is 'acr'. Overrides env.ACR_NAME."
+        type: string
+        required: false
+        default: ''
+      app_name:
+        description: "Name of the Container App in Azure. Overrides env.APP_NAME."
+        type: string
+        required: false
+        default: ''
+      resource_group:
+        description: "Resource group of the Container App. Empty = found by name. Overrides env.RESOURCE_GROUP."
+        type: string
+        required: false
+        default: ''
+      container_name:
+        description: "Container to update, when the app has more than one. Overrides env.CONTAINER_NAME."
+        type: string
+        required: false
+        default: ''
+      health_check_path:
+        description: "Path checked after the deploy (e.g. '/health'). Empty = no check. Overrides env.HEALTH_CHECK_PATH."
+        type: string
+        required: false
+        default: ''
+      environment:
+        description: "GitHub environment of the deploy job. Overrides env.ENVIRONMENT."
+        type: string
+        required: false
+        default: ''
+      azure_client_id:
+        description: "Client ID of the identity with Container Apps Contributor on the app. Overrides env.AZURE_CLIENT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_tenant_id:
+        description: "Microsoft Entra tenant ID. Overrides env.AZURE_TENANT_ID."
+        type: string
+        required: false
+        default: ''
+      azure_subscription_id:
+        description: "Azure subscription ID. Overrides env.AZURE_SUBSCRIPTION_ID."
+        type: string
+        required: false
+        default: ''
+    outputs:
+      image:
+        description: "The image reference deployed (or that would be, when nothing was deployed)."
+        value: ${{ jobs.resolve.outputs.image }}
+      revision:
+        description: "Name of the revision running the image (empty when nothing was deployed)."
+        value: ${{ jobs.deploy.outputs.revision }}
+      url:
+        description: "URL of the app (empty without external ingress, or when nothing was deployed)."
+        value: ${{ jobs.deploy.outputs.url }}
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Image to deploy, e.g. 'ghcr.io/org/app:stable'. Empty = the image docker-build-push.yml
+  # pushed for the commit, derived from the three values below.
+  IMAGE: ''
+  # Where docker-build-push.yml publishes: same values as there.
+  REGISTRY: 'ghcr'
+  IMAGE_NAME: ''
+  ACR_NAME: ''
+  # The Container App in Azure. It must exist (this workflow updates it, never creates it).
+  APP_NAME: ''
+  RESOURCE_GROUP: ''
+  # Container to update, when the app has more than one (sidecars). Empty = the only one.
+  CONTAINER_NAME: ''
+  # Path requested after the deploy until it answers (e.g. '/health'). Needs external
+  # ingress. Empty = no check (the workflow still waits for the revision to run).
+  HEALTH_CHECK_PATH: ''
+  # GitHub environment of the deploy job: shows the URL and deploy history in the repo, and
+  # can require approvals. The OIDC federated credential must match it (see the docs).
+  ENVIRONMENT: 'production'
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  resolve:
+    name: Resolve image
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # After docker-build-push (or trivy-scan): only when it succeeded for a push to the
+    # default branch. PR builds, tags and weekly scans don't deploy.
+    if: >-
+      github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        contains(fromJSON('["push", "workflow_run"]'), github.event.workflow_run.event) &&
+        github.event.workflow_run.head_branch == github.event.repository.default_branch)
+    permissions: {}
+    outputs:
+      deploy: ${{ steps.resolve.outputs.deploy }}
+      image: ${{ steps.resolve.outputs.image }}
+      app_name: ${{ steps.resolve.outputs.app_name }}
+      environment: ${{ steps.resolve.outputs.environment }}
+    steps:
+      # No checkout: nothing from the repo is needed.
+      - name: Resolve image
+        id: resolve
+        env:
+          IMAGE: ${{ inputs.image || env.IMAGE }}
+          REGISTRY: ${{ inputs.registry || env.REGISTRY }}
+          IMAGE_NAME: ${{ inputs.image_name || env.IMAGE_NAME }}
+          ACR_NAME: ${{ inputs.acr_name || env.ACR_NAME }}
+          APP_NAME: ${{ inputs.app_name || env.APP_NAME }}
+          CONTAINER_NAME: ${{ inputs.container_name || env.CONTAINER_NAME }}
+          ENVIRONMENT: ${{ inputs.environment || env.ENVIRONMENT }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+          EVENT: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          # The image: explicit, or the one docker-build-push.yml pushed for this commit.
+          if [ -n "${IMAGE}" ]; then
+            ref="${IMAGE}"
+            [ -z "${TAG}" ] || echo "::warning::IMAGE is set, so the tag '${TAG}' is ignored."
+          else
+            # Derived like docker-build-push.yml: <host>/<name>, lowercase.
+            repo="${GITHUB_REPOSITORY,,}"
+            name="${IMAGE_NAME,,}"
+            case "${REGISTRY}" in
+              ghcr)
+                host=ghcr.io
+                if [ -z "${name}" ]; then name="${repo}"; elif [[ "${name}" != */* ]]; then name="${repo%%/*}/${name}"; fi ;;
+              acr)
+                acr="${ACR_NAME:-}"; acr="${acr,,}"; acr="${acr%.azurecr.io}"
+                if ! [[ "${acr}" =~ ^[a-z0-9]{5,50}$ ]]; then
+                  echo "::error::REGISTRY is 'acr': set ACR_NAME to the registry name (5-50 letters and digits, without .azurecr.io). Got: '${ACR_NAME}'."
+                  exit 1
+                fi
+                host="${acr}.azurecr.io"; name="${name:-${repo#*/}}" ;;
+              *)
+                echo "::error::REGISTRY must be 'ghcr' or 'acr'. Got: '${REGISTRY}'."; exit 1 ;;
+            esac
+            # docker-build-push tags every pushed image sha-<7-char commit>.
+            tag="${TAG:-sha-${RUN_SHA:0:7}}"
+            ref="${host}/${name}:${tag}"
+          fi
+
+          # A tag or a digest is required: a bare name would deploy whatever 'latest' is.
+          component='[a-z0-9]+([._-][a-z0-9]+)*'
+          pattern="^([a-z0-9.-]+(:[0-9]+)?/)?${component}(/${component})*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[a-f0-9]{64})?$"
+          if ! [[ "${ref}" =~ ${pattern} ]] || ! [[ "${ref##*/}" == *[:@]* ]]; then
+            echo "::error::'${ref}' isn't a valid image reference with a tag or digest (e.g. ghcr.io/org/app:sha-1a2b3c4 or ghcr.io/org/app@sha256:…)."
+            exit 1
+          fi
+
+          if [ -n "${APP_NAME}" ] && ! [[ "${APP_NAME}" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]]; then
+            echo "::error::'${APP_NAME}' isn't a valid Container App name (2-32 lowercase letters, digits and '-', starting with a letter)."
+            exit 1
+          fi
+          if [ -n "${CONTAINER_NAME}" ] && ! [[ "${CONTAINER_NAME}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+            echo "::error::'${CONTAINER_NAME}' isn't a valid container name (lowercase letters, digits and '-')."
+            exit 1
+          fi
+
+          # Deploy: on the default branch, never for pull requests, when APP_NAME is set.
+          deploy=false
+          if [[ "${EVENT}" == pull_request* ]]; then
+            echo "::notice::Pull request: nothing is deployed."
+          elif [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ] && [ "${EVENT}" != workflow_run ]; then
+            echo "::warning::Not deployed: only the default branch (${DEFAULT_BRANCH}) deploys. Got: ${GITHUB_REF}."
+          elif [ -z "${APP_NAME}" ]; then
+            echo "::warning::Not deployed: set APP_NAME (and the AZURE_* variables)."
+          else
+            deploy=true
+          fi
+          if [ "${deploy}" = true ] && [ -z "${ENVIRONMENT}" ]; then
+            echo "::error::ENVIRONMENT can't be empty."; exit 1
+          fi
+          echo "Image: ${ref} | deploy: ${deploy}${APP_NAME:+ | app: ${APP_NAME}}"
+
+          {
+            echo "deploy=${deploy}"
+            echo "image=${ref}"
+            echo "app_name=${APP_NAME}"
+            echo "environment=${ENVIRONMENT}"
+          } >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to Container Apps
+    needs: resolve
+    if: needs.resolve.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write   # Azure login (OIDC)
+    environment:
+      name: ${{ needs.resolve.outputs.environment }}
+      url: ${{ steps.update.outputs.url }}
+    # One deploy at a time per app; a newer one waits instead of cancelling a running one.
+    concurrency:
+      group: containerapp-deploy-${{ github.repository }}-${{ needs.resolve.outputs.app_name }}
+      cancel-in-progress: false
+    outputs:
+      revision: ${{ steps.update.outputs.revision }}
+      url: ${{ steps.update.outputs.url }}
+    steps:
+      # Shared with the other Azure deploys: checks the AZURE_* values, then azure/login.
+      - name: Log in to Azure
+        uses: rubone/shared-workflows/actions/azure-login@v1
+        with:
+          client-id: ${{ inputs.azure_client_id || env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ inputs.azure_tenant_id || env.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Update the image
+        id: update
+        env:
+          APP: ${{ needs.resolve.outputs.app_name }}
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          RG: ${{ inputs.resource_group || env.RESOURCE_GROUP }}
+          CONTAINER_WANTED: ${{ inputs.container_name || env.CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+
+          rg="${RG}"
+          if [ -z "${rg}" ]; then
+            rg=$(az resource list --resource-type Microsoft.App/containerApps --name "${APP}" --query '[0].resourceGroup' --output tsv)
+            if [ -z "${rg}" ]; then
+              echo "::error::Container App '${APP}' not found in subscription $(az account show --query id --output tsv). Check APP_NAME, AZURE_SUBSCRIPTION_ID and the identity's role on the app."
+              exit 1
+            fi
+          fi
+          echo "rg=${rg}" >> "$GITHUB_OUTPUT"
+
+          current=$(az containerapp show --name "${APP}" --resource-group "${rg}" --output json)
+          mapfile -t containers < <(jq -r '.properties.template.containers[].name' <<< "${current}")
+          container="${CONTAINER_WANTED}"
+          if [ -z "${container}" ]; then
+            if [ "${#containers[@]}" -gt 1 ]; then
+              echo "::error::'${APP}' has ${#containers[@]} containers (${containers[*]}). Set CONTAINER_NAME to the one that runs this image."
+              exit 1
+            fi
+            container="${containers[0]}"
+          elif ! printf '%s\n' "${containers[@]}" | grep -qxF "${container}"; then
+            echo "::error::'${APP}' has no container '${container}'. Its containers: ${containers[*]}."
+            exit 1
+          fi
+          previous=$(jq -r --arg c "${container}" '.properties.template.containers[] | select(.name == $c) | .image' <<< "${current}")
+          echo "previous=${previous}" >> "$GITHUB_OUTPUT"
+          echo "Container '${container}': ${previous} → ${IMAGE}"
+
+          # A new image creates a new revision; the same image changes nothing.
+          updated=$(az containerapp update --name "${APP}" --resource-group "${rg}" \
+            --container-name "${container}" --image "${IMAGE}" --output json)
+          revision=$(jq -r '.properties.latestRevisionName' <<< "${updated}")
+          fqdn=$(jq -r 'if .properties.configuration.ingress.external then .properties.configuration.ingress.fqdn // "" else "" end' <<< "${updated}")
+          [ "${previous}" != "${IMAGE}" ] || echo "::notice::'${APP}' already ran ${IMAGE}; no new revision."
+
+          # Multiple revision mode: the new revision only gets traffic if the rules say so.
+          if [ "$(jq -r '.properties.configuration.activeRevisionsMode' <<< "${updated}")" = Multiple ] \
+             && ! jq -e --arg r "${revision}" '.properties.configuration.ingress.traffic // [] | any(.latestRevision == true or .revisionName == $r)' <<< "${updated}" > /dev/null; then
+            echo "::warning::'${APP}' is in multiple revision mode and its traffic rules don't send traffic to the new revision ${revision}. Shift it in the portal (Revisions and replicas) or with az containerapp ingress traffic set."
+          fi
+
+          {
+            echo "revision=${revision}"
+            echo "url=${fqdn:+https://${fqdn}}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the revision
+        id: revision
+        env:
+          APP: ${{ needs.resolve.outputs.app_name }}
+          RG: ${{ steps.update.outputs.rg }}
+          REVISION: ${{ steps.update.outputs.revision }}
+        run: |
+          set -uo pipefail
+          # Up to 10 minutes: pulling the image and starting the replicas.
+          for i in $(seq 1 40); do
+            state=$(az containerapp revision show --name "${APP}" --resource-group "${RG}" --revision "${REVISION}" \
+              --query '{provisioning: properties.provisioningState, running: properties.runningState, health: properties.healthState, replicas: properties.replicas}' \
+              --output json) || state='{}'
+            provisioning=$(jq -r '.provisioning // ""' <<< "${state}")
+            running=$(jq -r '.running // ""' <<< "${state}")
+            echo "Attempt ${i}: provisioning ${provisioning:-?}, running ${running:-?}, health $(jq -r '.health // "?"' <<< "${state}"), replicas $(jq -r '.replicas // "?"' <<< "${state}")"
+            if [ "${provisioning}" = Failed ] || [[ "${running}" =~ ^(Failed|Degraded)$ ]]; then
+              echo "::error::Revision ${REVISION} is ${running:-${provisioning}}. Usual causes: the app can't pull the image (registry not configured on the app, or no AcrPull), or the container exits on start. See the revision's system and console logs in the portal (Revisions and replicas)."
+              exit 1
+            fi
+            if [ "${provisioning}" = Provisioned ] && [ -n "${running}" ] \
+               && ! [[ "${running}" =~ ^(Processing|Activating|Provisioning|Unknown)$ ]]; then
+              echo "state=${running}" >> "$GITHUB_OUTPUT"
+              echo "Revision ${REVISION}: ${running}."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::Revision ${REVISION} didn't reach a running state within 10 minutes. See its logs in the portal (Revisions and replicas)."
+          exit 1
+
+      - name: Health check
+        id: health
+        if: inputs.health_check_path != '' || env.HEALTH_CHECK_PATH != ''
+        env:
+          URL: ${{ steps.update.outputs.url }}
+          HEALTH_PATH: ${{ inputs.health_check_path || env.HEALTH_CHECK_PATH }}
+        run: |
+          set -uo pipefail
+          if [ -z "${URL}" ]; then
+            echo "::warning::HEALTH_CHECK_PATH is set, but the app has no external ingress, so it can't be reached from the runner. Skipping the health check."
+            exit 0
+          fi
+          target="${URL%/}/${HEALTH_PATH#/}"
+          # Scaled to zero, the first request also starts a replica: up to 5 minutes.
+          for i in $(seq 1 20); do
+            code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 --location "${target}")
+            echo "Attempt ${i}: HTTP ${code}"
+            if [ "${code}" -ge 200 ] && [ "${code}" -lt 400 ]; then
+              echo "${target} answered HTTP ${code}."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::${target} didn't answer with a 2xx or 3xx status within 5 minutes. Check the revision's console logs in the portal."
+          exit 1
+
+      - name: Summary
+        if: always()
+        env:
+          APP: ${{ needs.resolve.outputs.app_name }}
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          PREVIOUS: ${{ steps.update.outputs.previous }}
+          ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
+          REVISION: ${{ steps.update.outputs.revision }}
+          STATE: ${{ steps.revision.outputs.state }}
+          URL: ${{ steps.update.outputs.url }}
+          UPDATED: ${{ steps.update.outcome }}
+          HEALTH: ${{ steps.health.outcome }}
+        run: |
+          {
+            echo "### Container App deploy"
+            echo
+            echo "App: \`${APP}\` · environment \`${ENVIRONMENT}\` · update: ${UPDATED}${HEALTH:+ · health check: ${HEALTH}}"
+            echo
+            echo "Image: \`${IMAGE}\`"
+            [ -n "${PREVIOUS}" ] && [ "${PREVIOUS}" != "${IMAGE}" ] && echo && echo "Previous: \`${PREVIOUS}\` (to roll back, run the workflow manually with its tag)"
+            [ -n "${REVISION}" ] && echo && echo "Revision: \`${REVISION}\`${STATE:+ (${STATE})}"
+            [ -n "${URL}" ] && echo && echo "${URL}"
+            true
+          } >> "$GITHUB_STEP_SUMMARY"

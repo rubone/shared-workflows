@@ -1,0 +1,54 @@
+# Call mode: copy to .github/workflows/container-app.yml in the project repo. It replaces the
+# docker-build-push caller: one workflow builds and pushes the image, then deploys it.
+# To not depend on this repo for the workflows (or if the org blocks external workflows), copy
+# .github/workflows/docker-build-push.yml and azure-container-apps-deploy.yml instead (copy
+# mode). Both modes sign in with the rubone/shared-workflows/actions/azure-login action.
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/azure-container-apps-deploy.md
+name: Container App
+
+on:
+  pull_request:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  docker:
+    permissions:
+      contents: read
+      packages: write   # push to GHCR
+      id-token: write   # sign in to Azure with OIDC (ACR only; harmless otherwise)
+    uses: rubone/shared-workflows/.github/workflows/docker-build-push.yml@v1
+    with:
+      registry: 'ghcr'                 # or 'acr' (then acr_name)
+
+  # Optional: scan before deploying. Add `trivy` to the deploy job's needs.
+  # trivy:
+  #   needs: docker
+  #   if: needs.docker.outputs.digest != ''
+  #   permissions: { contents: read, packages: read, id-token: write, security-events: write, actions: read }
+  #   uses: rubone/shared-workflows/.github/workflows/trivy-scan.yml@v1
+  #   with:
+  #     image: ${{ needs.docker.outputs.image }}@${{ needs.docker.outputs.digest }}
+
+  deploy:
+    needs: docker
+    # Only when an image was pushed (not on pull requests).
+    if: needs.docker.outputs.digest != ''
+    permissions:
+      id-token: write   # OIDC login to Azure
+    uses: rubone/shared-workflows/.github/workflows/azure-container-apps-deploy.yml@v1
+    with:
+      image: ${{ needs.docker.outputs.image }}@${{ needs.docker.outputs.digest }}
+      app_name: 'my-api'               # the Container App in Azure
+      resource_group: ''               # empty = found by name
+      container_name: ''               # empty = the app's only container
+      health_check_path: '/health'     # checked after the deploy; '' = no check
+      environment: 'production'        # GitHub environment of the deploy job
+      # azure_client_id / azure_tenant_id / azure_subscription_id default to the
+      # AZURE_* repository variables.
