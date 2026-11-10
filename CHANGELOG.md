@@ -49,6 +49,15 @@ changes to inputs, secrets or behavior require a new major version.
   modes.
 - `tests/fixtures/dotnet-web` and `tests/fixtures/node-web`: minimal ASP.NET and Node web apps
   without dependencies, for the self-test.
+- `azure-container-apps-deploy.yml`: deploys the image docker-build-push pushed for the commit
+  (`sha-<commit>`, derived from the same registry values, or any `image` such as
+  `image@digest` in call mode) to an existing Azure Container App with
+  `az containerapp update`, after each push to the default branch (`workflow_run`, or after
+  `Trivy scan` to deploy only scanned images). Manual runs take a `tag` to roll back. Waits
+  for the new revision to run, warns when multiple revision mode leaves it without traffic,
+  optional health check. Signs in with the `azure-login` action; the deploy job runs in a
+  GitHub environment (`production`). No third-party actions. Outputs the image, revision and
+  URL. Copy and call modes.
 - `actions/azure-login`: first composite action. Checks the `AZURE_*` values (set, GUIDs) and
   the job's `id-token: write` permission with clear errors, then runs `azure/login` (OIDC).
   The Azure deploys reference it as `rubone/shared-workflows/actions/azure-login@v1` in both

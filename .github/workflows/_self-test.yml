@@ -374,3 +374,46 @@ jobs:
     uses: ./.github/workflows/azure-webapp-deploy.yml
     with:
       working_directory: ${{ matrix.project }}
+
+  # Smoke test of call mode: resolves the image derived from docker-build-push's values
+  # (ghcr.io/<repo>:sha-<commit>) and an explicit image by digest. PRs never deploy, so the
+  # deploy job is skipped; the check job compares the resolved references.
+  azure-container-apps-deploy-derived:
+    name: Container App (smoke test, derived image)
+    if: github.event_name == 'pull_request'
+    permissions:
+      id-token: write
+    uses: ./.github/workflows/azure-container-apps-deploy.yml
+    with:
+      app_name: my-api
+
+  azure-container-apps-deploy-explicit:
+    name: Container App (smoke test, explicit image)
+    if: github.event_name == 'pull_request'
+    permissions:
+      id-token: write
+    uses: ./.github/workflows/azure-container-apps-deploy.yml
+    with:
+      image: myregistry.azurecr.io/my-api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      app_name: my-api
+
+  azure-container-apps-deploy-outputs:
+    name: Container App (smoke test, check outputs)
+    needs: [azure-container-apps-deploy-derived, azure-container-apps-deploy-explicit]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the resolved images
+        env:
+          DERIVED: ${{ needs.azure-container-apps-deploy-derived.outputs.image }}
+          EXPLICIT: ${{ needs.azure-container-apps-deploy-explicit.outputs.image }}
+          REVISION: ${{ needs.azure-container-apps-deploy-derived.outputs.revision }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          want="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${SHA:0:7}"
+          echo "derived=${DERIVED} explicit=${EXPLICIT} revision=${REVISION:-none}"
+          [ "${DERIVED}" = "${want}" ] || { echo "::error::Derived image: expected ${want}, got '${DERIVED}'."; exit 1; }
+          [ "${EXPLICIT}" = "myregistry.azurecr.io/my-api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ] \
+            || { echo "::error::Explicit image changed: '${EXPLICIT}'."; exit 1; }
+          [ -z "${REVISION}" ] || { echo "::error::A pull request must not deploy (revision '${REVISION}')."; exit 1; }

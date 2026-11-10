@@ -177,6 +177,8 @@ read them. GHCR lists them as extra entries with platform `unknown/unknown`: tha
 
 To scan the image for known vulnerabilities on every PR, after each push and weekly, add
 [trivy-scan](trivy-scan.md).
+To deploy it to Azure Container Apps after each push to `main`, add
+[azure-container-apps-deploy](azure-container-apps-deploy.md).
 
 ---
 
