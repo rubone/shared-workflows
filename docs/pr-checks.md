@@ -20,7 +20,8 @@ Workflow that keeps pull requests consistent. It runs three independent jobs:
 
 With **squash merge**, each PR lands on `main` as one commit whose message is the PR title.
 Validating the title means every commit on `main` follows Conventional Commits, which release
-tools (release-please) read to pick the next version and write the changelog:
+tools (release-please, as in [release](release.md)) read to pick the next version and write
+the changelog:
 
 | Title | Release |
 |---|---|

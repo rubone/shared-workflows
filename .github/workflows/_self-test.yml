@@ -417,3 +417,55 @@ jobs:
           [ "${EXPLICIT}" = "myregistry.azurecr.io/my-api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ] \
             || { echo "::error::Explicit image changed: '${EXPLICIT}'."; exit 1; }
           [ -z "${REVISION}" ] || { echo "::error::A pull request must not deploy (revision '${REVISION}')."; exit 1; }
+
+  # Smoke test of call mode: detects the project type of the repo root (simple),
+  # tests/fixtures/node-npm (node) and tests/fixtures/dotnet (dotnet). PRs never release, so
+  # the release job is skipped; the check job compares the detected types. The nested job
+  # asks for write permissions, so the calling jobs must grant them.
+  release-root:
+    name: Release (smoke test, .)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/release.yml
+
+  release-node:
+    name: Release (smoke test, tests/fixtures/node-npm)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/release.yml
+    with:
+      working_directory: tests/fixtures/node-npm
+
+  release-dotnet:
+    name: Release (smoke test, tests/fixtures/dotnet)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/release.yml
+    with:
+      working_directory: tests/fixtures/dotnet
+
+  release-outputs:
+    name: Release (smoke test, check outputs)
+    needs: [release-root, release-node, release-dotnet]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the detected types
+        env:
+          ROOT: ${{ needs.release-root.outputs.release_type }}
+          NODE: ${{ needs.release-node.outputs.release_type }}
+          DOTNET: ${{ needs.release-dotnet.outputs.release_type }}
+          CREATED: ${{ needs.release-root.outputs.release_created }}${{ needs.release-node.outputs.release_created }}${{ needs.release-dotnet.outputs.release_created }}
+        run: |
+          echo "root=${ROOT} node=${NODE} dotnet=${DOTNET}"
+          [ "${ROOT}/${NODE}/${DOTNET}" = simple/node/dotnet ] || { echo "::error::Expected simple/node/dotnet."; exit 1; }
+          [ -z "${CREATED}" ] || { echo "::error::A pull request must not release."; exit 1; }
