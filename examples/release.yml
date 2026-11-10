@@ -1,0 +1,45 @@
+# Call mode: copy to .github/workflows/release.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy
+# .github/workflows/release.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/release.md
+name: Release
+
+on:
+  push:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  workflow_dispatch:
+    inputs:
+      release_as:
+        description: "Force the next version (e.g. 1.0.0). Empty = from the commits."
+        type: string
+        required: false
+        default: ''
+
+permissions: {}
+
+jobs:
+  release:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      contents: write        # release commits, tags and releases
+      pull-requests: write   # the release PR
+      issues: write          # its labels
+    uses: rubone/shared-workflows/.github/workflows/release.yml@v1
+    with:
+      working_directory: '.'         # folder released
+      release_type: 'auto'           # or 'node' / 'dotnet' / 'simple'
+      move_major_tag: 'false'        # 'true' for repos of actions or reusable workflows
+      release_as: ${{ inputs.release_as }}
+      # GitHub App, so checks run on the release PR (empty = GITHUB_TOKEN):
+      app_client_id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  # Publish in the same run when a release was created, e.g.:
+  # publish:
+  #   needs: release
+  #   if: needs.release.outputs.release_created == 'true'
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - run: echo "Publishing ${{ needs.release.outputs.tag_name }}"

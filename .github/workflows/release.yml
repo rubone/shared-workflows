@@ -1,0 +1,367 @@
+# Release: automates versioning with release-please, from Conventional Commits on the default
+# branch (pr-checks.yml validates the PR titles that become those commits with squash merge).
+#
+#   - Each push to the default branch opens or updates a release PR with the next version
+#     (feat → minor, fix → patch, ! or BREAKING CHANGE → major) and its CHANGELOG.md entry.
+#   - Merging that PR creates the vX.Y.Z tag and the GitHub release.
+#
+# What it updates, detected from the project (set RELEASE_TYPE to override):
+#   - Node (package.json): the "version" in package.json and package-lock.json.
+#   - .NET (a solution or project, up to two folders down): version.txt, and the
+#     <Version>/<VersionPrefix> already in Directory.Build.props or the projects. nuget-publish
+#     takes the version from the tag either way.
+#   - Anything else: version.txt.
+#
+# Token: GITHUB_TOKEN by default, which needs "Allow GitHub Actions to create and approve pull
+# requests" in the repo settings. Workflows don't run for its events: no checks on the release
+# PR and no release/tag-triggered workflows (npm-publish, nuget-publish, docker-build-push).
+# With a GitHub App (RELEASE_APP_CLIENT_ID variable and RELEASE_APP_PRIVATE_KEY secret), they do.
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      The push / workflow_dispatch triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        release:
+#          permissions: { contents: write, pull-requests: write, issues: write }
+#          uses: rubone/shared-workflows/.github/workflows/release.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#      Outputs: release_created, tag_name, version, major, pr (for a later publish job).
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/release.md
+name: Release
+
+on:
+  # A) Copy mode triggers.
+  push:
+    branches:
+      - main   # change if the repo's default branch isn't main
+  workflow_dispatch:
+    inputs:
+      release_as:
+        description: "Force the next version (e.g. 1.0.0 for the first release, or 2.0.0). Empty = from the commits."
+        type: string
+        required: false
+        default: ''
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder released, relative to the repo root (only commits touching it count). Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      release_type:
+        description: "'auto', 'node', 'dotnet' or 'simple'. Overrides env.RELEASE_TYPE."
+        type: string
+        required: false
+        default: ''
+      move_major_tag:
+        description: "'true' = also point vX at each release (for actions and reusable workflows). Overrides env.MOVE_MAJOR_TAG."
+        type: string
+        required: false
+        default: ''
+      release_as:
+        description: "Force the next version (e.g. '1.0.0'). Empty = from the commits."
+        type: string
+        required: false
+        default: ''
+      app_client_id:
+        description: "Client ID of the GitHub App that opens the release PR. Empty = GITHUB_TOKEN. Overrides env.APP_CLIENT_ID."
+        type: string
+        required: false
+        default: ''
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: "Private key of the GitHub App (with app_client_id)."
+        required: false
+    outputs:
+      release_created:
+        description: "'true' when this run created a release."
+        value: ${{ jobs.release.outputs.release_created }}
+      tag_name:
+        description: "Tag of the release created (e.g. v1.2.3). Empty otherwise."
+        value: ${{ jobs.release.outputs.tag_name }}
+      version:
+        description: "Version of the release created (e.g. 1.2.3). Empty otherwise."
+        value: ${{ jobs.release.outputs.version }}
+      major:
+        description: "Major version of the release created (e.g. 1). Empty otherwise."
+        value: ${{ jobs.release.outputs.major }}
+      pr:
+        description: "Number of the release PR opened or updated in this run. Empty otherwise."
+        value: ${{ jobs.release.outputs.pr }}
+      release_type:
+        description: "The project type detected: node, dotnet or simple."
+        value: ${{ jobs.detect.outputs.type }}
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder released, relative to the repo root ('.' = the whole repo). In a subfolder, only
+  # commits that touch it count, and its CHANGELOG.md and version files are the ones updated.
+  WORKING_DIRECTORY: '.'
+  # 'auto' = node with a package.json, dotnet with a .NET solution or project, else simple.
+  RELEASE_TYPE: 'auto'
+  # 'true' = also move the major tag (v1) to each release: for repos of actions and reusable
+  # workflows, whose users pin @v1. Not for apps or packages. 0.x releases never move it.
+  MOVE_MAJOR_TAG: 'false'
+  # GitHub App that opens the release PR and creates the release, so that workflows run for
+  # them. Empty = GITHUB_TOKEN. The private key goes in the RELEASE_APP_PRIVATE_KEY secret.
+  APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+
+jobs:
+  detect:
+    name: Detect project
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.detect.outputs.run }}
+      type: ${{ steps.detect.outputs.type }}
+      strategy: ${{ steps.detect.outputs.strategy }}
+      path: ${{ steps.detect.outputs.path }}
+      prefix: ${{ steps.detect.outputs.prefix }}
+      move_major: ${{ steps.detect.outputs.move_major }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect project
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          RELEASE_TYPE: ${{ inputs.release_type || env.RELEASE_TYPE }}
+          MOVE_MAJOR_TAG: ${{ inputs.move_major_tag || env.MOVE_MAJOR_TAG }}
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"; dir="${dir#./}"; dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a path inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          if [ ! -d "${dir}" ]; then
+            echo "::error::WORKING_DIRECTORY '${dir}' doesn't exist."; exit 1
+          fi
+          case "${MOVE_MAJOR_TAG}" in true|false) ;; *)
+            echo "::error::MOVE_MAJOR_TAG must be 'true' or 'false'. Got: '${MOVE_MAJOR_TAG}'."; exit 1 ;;
+          esac
+
+          # A .NET solution or project in the folder ($1 = 1) or up to two folders below ($1 = 3).
+          dotnet_found() {
+            [ -n "$(find "${dir}" -maxdepth "$1" \( -name .git -o -name node_modules -o -name bin -o -name obj \) -prune -o \
+              -type f \( -name '*.sln' -o -name '*.slnx' -o -name '*.csproj' -o -name '*.fsproj' -o -name Directory.Build.props \) -print -quit)" ]
+          }
+          # .NET next to a package.json wins (an ASP.NET app with a frontend), as in
+          # azure-webapp-deploy; a .NET project deeper down doesn't beat a package.json.
+          kind="${RELEASE_TYPE}"
+          if [ "${kind}" = auto ]; then
+            if dotnet_found 1; then kind=dotnet
+            elif [ -f "${dir}/package.json" ]; then kind=node
+            elif dotnet_found 3; then kind=dotnet
+            else kind=simple
+            fi
+          fi
+          case "${kind}" in
+            node)
+              strategy=node
+              if [ ! -f "${dir}/package.json" ]; then
+                echo "::error::RELEASE_TYPE is 'node' but there's no package.json in '${dir}'."; exit 1
+              fi
+              if ! jq -e '.version | type == "string"' "${dir}/package.json" > /dev/null; then
+                echo "::warning::${dir}/package.json has no \"version\" field; release-please adds it in the release PR."
+              fi ;;
+            dotnet)
+              strategy=simple
+              if ! find "${dir}" -maxdepth 3 \( -name .git -o -name node_modules -o -name bin -o -name obj \) -prune -o \
+                   -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name Directory.Build.props \) -print0 \
+                   | xargs -0 -r grep -lE '<(Version|VersionPrefix)>' | grep -q .; then
+                echo "::notice::No <Version> or <VersionPrefix> in Directory.Build.props or the projects: the release PR only updates version.txt and CHANGELOG.md. nuget-publish takes the version from the tag."
+              fi ;;
+            simple) strategy=simple ;;
+            *) echo "::error::RELEASE_TYPE must be 'auto', 'node', 'dotnet' or 'simple'. Got: '${RELEASE_TYPE}'."; exit 1 ;;
+          esac
+
+          # Releases come only from the default branch.
+          run=false
+          if [[ "${EVENT}" == pull_request* ]]; then
+            echo "::notice::Pull request: nothing is released."
+          elif [ "${GITHUB_REPOSITORY}" = rubone/shared-workflows ]; then
+            # Only where this file is published: that repo releases by hand (CHANGELOG.md).
+            # Harmless in copies; delete these lines if you fork rubone/shared-workflows.
+            echo "::notice::rubone/shared-workflows releases by hand; nothing is released."
+          elif [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "::warning::Not released: only the default branch (${DEFAULT_BRANCH}) releases. Got: ${GITHUB_REF}."
+          else
+            run=true
+          fi
+          echo "Project: ${kind} (release-please type ${strategy}) in '${dir}' | release: ${run} | move major tag: ${MOVE_MAJOR_TAG}"
+
+          {
+            echo "run=${run}"
+            echo "type=${kind}"
+            echo "strategy=${strategy}"
+            echo "path=$([ "${dir}" = . ] || echo "${dir}")"
+            # release-please names its outputs <path>--tag_name, or just tag_name at the root.
+            echo "prefix=$([ "${dir}" = . ] || echo "${dir}--")"
+            echo "move_major=${MOVE_MAJOR_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Release PR and release
+    needs: detect
+    if: needs.detect.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write        # release commits, tags and releases
+      pull-requests: write   # the release PR
+      issues: write          # its labels
+    # One run at a time: two runs on the same release PR would race.
+    concurrency:
+      group: release-${{ github.repository }}-${{ needs.detect.outputs.path }}
+      cancel-in-progress: false
+    outputs:
+      release_created: ${{ steps.release.outputs[format('{0}release_created', needs.detect.outputs.prefix)] }}
+      tag_name: ${{ steps.release.outputs[format('{0}tag_name', needs.detect.outputs.prefix)] }}
+      version: ${{ steps.release.outputs[format('{0}version', needs.detect.outputs.prefix)] }}
+      major: ${{ steps.release.outputs[format('{0}major', needs.detect.outputs.prefix)] }}
+      pr: ${{ steps.release.outputs.pr && fromJSON(steps.release.outputs.pr).number || '' }}
+    steps:
+      - name: Check the token
+        id: token
+        env:
+          CLIENT_ID: ${{ inputs.app_client_id || env.APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "${CLIENT_ID}" ] && [ -n "${PRIVATE_KEY}" ]; then
+            echo "app=true" >> "$GITHUB_OUTPUT"
+            echo "Using the GitHub App ${CLIENT_ID}."
+          elif [ -n "${CLIENT_ID}" ] || [ -n "${PRIVATE_KEY}" ]; then
+            echo "::error::Set both RELEASE_APP_CLIENT_ID (variable) and RELEASE_APP_PRIVATE_KEY (secret) to use a GitHub App, or neither to use GITHUB_TOKEN. In call mode, pass the secret to the reusable workflow."
+            exit 1
+          else
+            echo "app=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Using GITHUB_TOKEN: checks won't run on the release PR, and the release won't trigger other workflows. See the docs for the GitHub App option."
+          fi
+
+      - name: Create the GitHub App token
+        id: app
+        if: steps.token.outputs.app == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.app_client_id || env.APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app.outputs.token || github.token }}
+          release-type: ${{ needs.detect.outputs.strategy }}
+          path: ${{ needs.detect.outputs.path }}
+          release-as: ${{ inputs.release_as }}
+          target-branch: ${{ github.event.repository.default_branch }}
+
+      # .NET: release-please's simple type only writes version.txt. Copy the new version into
+      # the <Version>/<VersionPrefix> elements the projects already have, on the release PR.
+      - name: Checkout the release PR
+        if: needs.detect.outputs.type == 'dotnet' && steps.release.outputs.pr
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          token: ${{ steps.app.outputs.token || github.token }}
+          persist-credentials: true   # pushes the version commit
+
+      - name: Update the .NET version
+        if: needs.detect.outputs.type == 'dotnet' && steps.release.outputs.pr
+        env:
+          DIR: ${{ needs.detect.outputs.path || '.' }}
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          set -euo pipefail
+          new=$(tr -d '[:space:]' < "${DIR}/version.txt")
+          if ! [[ "${new}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then
+            echo "::error::version.txt on ${BRANCH} doesn't hold a version: '${new}'."; exit 1
+          fi
+          mapfile -d '' files < <(find "${DIR}" -maxdepth 3 \( -name .git -o -name node_modules -o -name bin -o -name obj \) -prune -o \
+            -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name Directory.Build.props \) -print0)
+          changed=()
+          for f in "${files[@]}"; do
+            # Only plain values (1.2.3, 1.2.3-beta.1); MSBuild expressions are left alone.
+            sed -E -i "s#<(Version|VersionPrefix)>[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?</(Version|VersionPrefix)>#<\1>${new}</\3>#g" "${f}"
+            git diff --quiet -- "${f}" || changed+=("${f}")
+          done
+          if [ "${#changed[@]}" -eq 0 ]; then
+            echo "No .NET version to update (already ${new}, or none set)."
+            exit 0
+          fi
+          printf 'Updated to %s: %s\n' "${new}" "${changed[*]}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "${changed[@]}"
+          git commit --quiet --message "chore: update .NET version to ${new}"
+          git push --quiet origin "HEAD:${BRANCH}"
+
+      - name: Move the major tag
+        if: needs.detect.outputs.move_major == 'true' && steps.release.outputs[format('{0}release_created', needs.detect.outputs.prefix)] == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          MAJOR: ${{ steps.release.outputs[format('{0}major', needs.detect.outputs.prefix)] }}
+          SHA: ${{ steps.release.outputs[format('{0}sha', needs.detect.outputs.prefix)] }}
+          TAG: ${{ steps.release.outputs[format('{0}tag_name', needs.detect.outputs.prefix)] }}
+        run: |
+          set -euo pipefail
+          if [ "${MAJOR}" = 0 ]; then
+            echo "::notice::${TAG} is a 0.x release: the major tag isn't moved."
+            exit 0
+          fi
+          ref="tags/v${MAJOR}"
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/${ref}" > /dev/null 2>&1; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/${ref}" -f sha="${SHA}" -F force=true > /dev/null
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/${ref}" -f sha="${SHA}" > /dev/null
+          fi
+          echo "v${MAJOR} → ${TAG} (${SHA:0:7})"
+
+      - name: Summary
+        if: always()
+        env:
+          CREATED: ${{ steps.release.outputs[format('{0}release_created', needs.detect.outputs.prefix)] }}
+          TAG: ${{ steps.release.outputs[format('{0}tag_name', needs.detect.outputs.prefix)] }}
+          URL: ${{ steps.release.outputs[format('{0}html_url', needs.detect.outputs.prefix)] }}
+          PR: ${{ steps.release.outputs.pr }}
+          OUTCOME: ${{ steps.release.outcome }}
+          APP: ${{ steps.token.outputs.app }}
+        run: |
+          {
+            echo "### Release"
+            echo
+            if [ "${OUTCOME}" != success ]; then
+              echo "release-please: ${OUTCOME:-not reached}; see the log."
+            fi
+            if [ "${CREATED}" = true ]; then
+              echo "Released [${TAG}](${URL})."
+            fi
+            if [ -n "${PR}" ]; then
+              echo "Release PR: [#$(jq -r .number <<< "${PR}") $(jq -r .title <<< "${PR}")](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/$(jq -r .number <<< "${PR}"))"
+            elif [ "${OUTCOME}" = success ] && [ "${CREATED}" != true ]; then
+              echo "No changes to release (only feat, fix, perf, revert and breaking changes count), or the release PR is up to date."
+            fi
+            echo
+            if [ "${APP}" = true ]; then echo "Token: GitHub App."; else echo "Token: GITHUB_TOKEN (no checks on the release PR)."; fi
+          } >> "$GITHUB_STEP_SUMMARY"

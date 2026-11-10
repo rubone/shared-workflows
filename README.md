@@ -57,6 +57,7 @@ shared-workflows/
 | [`azure-static-web-apps-deploy.yml`](.github/workflows/azure-static-web-apps-deploy.yml) | Builds a frontend (React, Angular, Vue…) with its package manager and deploys it to Azure Static Web Apps from `main`. PRs only build. OIDC (no stored secret) or the deployment token. | [docs](docs/azure-static-web-apps-deploy.md) | [caller](examples/azure-static-web-apps-deploy.yml) |
 | [`azure-webapp-deploy.yml`](.github/workflows/azure-webapp-deploy.yml) | Builds a .NET (`dotnet publish`) or Node app (production dependencies only) into a package and deploys it to Azure App Service from `main`, with an optional health check. PRs only build. OIDC, no stored secret. | [docs](docs/azure-webapp-deploy.md) | [caller](examples/azure-webapp-deploy.yml) |
 | [`azure-container-apps-deploy.yml`](.github/workflows/azure-container-apps-deploy.yml) | Deploys the image docker-build-push pushed (`sha-<commit>`) to an existing Azure Container App after each push to `main`, waits for the new revision to run, with an optional health check. Manual runs roll back to an earlier tag. OIDC, no stored secret. | [docs](docs/azure-container-apps-deploy.md) | [caller](examples/azure-container-apps-deploy.yml) |
+| [`release.yml`](.github/workflows/release.yml) | Release PR with the next version and `CHANGELOG.md` from Conventional Commits (release-please); merging it creates the tag and the GitHub release. Updates the version of Node and .NET projects. Optional GitHub App token and major tag (`v1`). | [docs](docs/release.md) | [caller](examples/release.yml) |
 
 ## Available actions
 
@@ -87,6 +88,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `azure-static-web-apps-deploy.yml` | A Static Web App, and either an identity with Contributor on it plus `APP_NAME` and the `AZURE_*` variables (OIDC), or the `AZURE_STATIC_WEB_APPS_API_TOKEN` secret | Free plan available | Free plan available |
 | `azure-webapp-deploy.yml` | A Web App with the matching runtime, an identity with Website Contributor on it, `APP_NAME` and the `AZURE_*` variables | App Service plan | App Service plan |
 | `azure-container-apps-deploy.yml` | A Container App that can pull the image (ACR: its managed identity with AcrPull), an identity with Container Apps Contributor on the app and its environment, `APP_NAME` and the `AZURE_*` variables. Copy mode: `docker-build-push.yml` next to it | Consumption plan with a free monthly grant | Consumption plan with a free monthly grant |
+| `release.yml` | Conventional Commits on `main` (squash merge with `pr-checks.yml`). GITHUB_TOKEN: **Allow GitHub Actions to create and approve pull requests** in Settings → Actions. Or a GitHub App: `RELEASE_APP_CLIENT_ID` variable and `RELEASE_APP_PRIVATE_KEY` secret | — | — |
 
 Recommended, though no workflow depends on them:
 

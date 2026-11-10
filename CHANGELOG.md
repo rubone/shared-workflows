@@ -6,6 +6,18 @@ changes to inputs, secrets or behavior require a new major version.
 
 ## [Unreleased]
 
+### Added
+- `release.yml`: automated releases with `googleapis/release-please-action` v5.0.0 pinned by
+  SHA. Each push to the default branch opens or updates a release PR with the next version
+  (from Conventional Commits) and its `CHANGELOG.md` entry; merging it creates the tag and the
+  GitHub release. Detects Node (`package.json`), .NET (also copies the version into the
+  existing `<Version>`/`<VersionPrefix>` on the release PR) or simple (`version.txt`).
+  GITHUB_TOKEN by default, or a GitHub App token (`actions/create-github-app-token` v3.3.0)
+  so checks run on the release PR and the release triggers other workflows. Optional
+  `WORKING_DIRECTORY` and moving the major tag (`v1`). Outputs `release_created`, `tag_name`,
+  `version`, `major`, `pr`. Skipped in this repo, which releases by hand. Copy and call
+  modes.
+
 ## [1.1.0] - 2026-11-10
 
 ### Added
