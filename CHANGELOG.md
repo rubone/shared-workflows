@@ -6,6 +6,8 @@ changes to inputs, secrets or behavior require a new major version.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-10
+
 ### Added
 - `docker-build-push.yml`: builds a Docker image with Buildx (GitHub Actions layer cache) and
   pushes it to GHCR (`GITHUB_TOKEN`) or ACR (Azure OIDC with `azure/login` v3.1.0). PRs only
@@ -61,7 +63,7 @@ changes to inputs, secrets or behavior require a new major version.
 - `actions/azure-login`: first composite action. Checks the `AZURE_*` values (set, GUIDs) and
   the job's `id-token: write` permission with clear errors, then runs `azure/login` (OIDC).
   The Azure deploys reference it as `rubone/shared-workflows/actions/azure-login@v1` in both
-  modes, so `v1` must be moved to a release that includes it before they can sign in.
+  modes: they can sign in from this release on.
 
 ## [1.0.0] - 2026-11-05
 
@@ -126,5 +128,6 @@ changes to inputs, secrets or behavior require a new major version.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.
 
-[Unreleased]: https://github.com/rubone/shared-workflows/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/rubone/shared-workflows/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/rubone/shared-workflows/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rubone/shared-workflows/releases/tag/v1.0.0
