@@ -1,0 +1,23 @@
+{
+  "name": "@rubone/shared-workflows-npm-fixture",
+  "version": "1.0.0",
+  "description": "Fixture for npm-publish.yml's self-test (dry run only). Never published.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rubone/shared-workflows.git",
+    "directory": "tests/fixtures/npm-package"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.14"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').cpSync('src', 'dist', { recursive: true })\""
+  }
+}

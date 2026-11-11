@@ -1,0 +1,52 @@
+# Call mode: copy to .github/workflows/npm-publish.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy
+# .github/workflows/npm-publish.yml instead (copy mode).
+# npmjs.com trusted publishing checks THIS file's name: configure npm-publish.yml there.
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/npm-publish.md
+name: npm publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack and run npm publish --dry-run, without publishing."
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  publish:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      contents: read
+      id-token: write    # npmjs trusted publishing and provenance
+      packages: write    # GitHub Packages
+    uses: rubone/shared-workflows/.github/workflows/npm-publish.yml@v1
+    with:
+      working_directory: '.'   # folder with the package's package.json
+      registry: 'npmjs'        # or 'github' (GitHub Packages, @owner/name)
+      dist_tag: ''             # '' = latest, or beta/rc… for prereleases
+      dry_run: ${{ inputs.dry_run || false }}
+    # Only with a token instead of trusted publishing:
+    # secrets:
+    #   NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+# Or publish in the same run as release.yml (works with GITHUB_TOKEN releases):
+#
+# on:
+#   push:
+#     branches: [main]
+# jobs:
+#   release:
+#     permissions: { contents: write, pull-requests: write, issues: write }
+#     uses: rubone/shared-workflows/.github/workflows/release.yml@v1
+#   publish:
+#     needs: release
+#     if: needs.release.outputs.release_created == 'true'
+#     permissions: { contents: read, id-token: write, packages: write }
+#     uses: rubone/shared-workflows/.github/workflows/npm-publish.yml@v1
+#     with:
+#       tag: ${{ needs.release.outputs.tag_name }}
