@@ -59,6 +59,7 @@ shared-workflows/
 | [`azure-container-apps-deploy.yml`](.github/workflows/azure-container-apps-deploy.yml) | Deploys the image docker-build-push pushed (`sha-<commit>`) to an existing Azure Container App after each push to `main`, waits for the new revision to run, with an optional health check. Manual runs roll back to an earlier tag. OIDC, no stored secret. | [docs](docs/azure-container-apps-deploy.md) | [caller](examples/azure-container-apps-deploy.yml) |
 | [`release.yml`](.github/workflows/release.yml) | Release PR with the next version and `CHANGELOG.md` from Conventional Commits (release-please); merging it creates the tag and the GitHub release. Updates the version of Node and .NET projects. Optional GitHub App token and major tag (`v1`). | [docs](docs/release.md) | [caller](examples/release.yml) |
 | [`npm-publish.yml`](.github/workflows/npm-publish.yml) | Publishes an npm package to npmjs.com or GitHub Packages when a release is published: checks the version against the tag, builds, packs with the package manager and publishes, skipping versions already there. Trusted publishing (OIDC, no stored token) with provenance, or an `NPM_TOKEN`. | [docs](docs/npm-publish.md) | [caller](examples/npm-publish.yml) |
+| [`nuget-publish.yml`](.github/workflows/nuget-publish.yml) | Packs the .NET projects of a solution with the version from the release tag and pushes them to nuget.org (with symbol packages) or GitHub Packages when a release is published, skipping versions already there. Trusted publishing (OIDC with `NuGet/login`, no stored key) or a `NUGET_API_KEY`. | [docs](docs/nuget-publish.md) | [caller](examples/nuget-publish.yml) |
 
 ## Available actions
 
@@ -91,6 +92,7 @@ stays green. Settings live in the project repo under **Settings → Advanced Sec
 | `azure-container-apps-deploy.yml` | A Container App that can pull the image (ACR: its managed identity with AcrPull), an identity with Container Apps Contributor on the app and its environment, `APP_NAME` and the `AZURE_*` variables. Copy mode: `docker-build-push.yml` next to it | Consumption plan with a free monthly grant | Consumption plan with a free monthly grant |
 | `release.yml` | Conventional Commits on `main` (squash merge with `pr-checks.yml`). GITHUB_TOKEN: **Allow GitHub Actions to create and approve pull requests** in Settings → Actions. Or a GitHub App: `RELEASE_APP_CLIENT_ID` variable and `RELEASE_APP_PRIVATE_KEY` secret | — | — |
 | `npm-publish.yml` | A `package.json` without `"private": true`. npmjs: a trusted publisher for the package (repo + workflow file name) and `repository.url` pointing to the repo, or the `NPM_TOKEN` secret. GitHub Packages: the name scoped to the owner (`@owner/name`). A release that triggers workflows (not created with GITHUB_TOKEN) | Provenance included | No provenance |
+| `nuget-publish.yml` | A packable project. nuget.org: a trusted publishing policy (repo + workflow file name) and the `NUGET_USER` variable, or the `NUGET_API_KEY` secret. A release that triggers workflows (not created with GITHUB_TOKEN) | — | Trusted publishing policies start active for 7 days |
 
 Recommended, though no workflow depends on them:
 

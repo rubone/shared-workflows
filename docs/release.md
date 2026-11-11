@@ -220,5 +220,5 @@ restricts who can create `v*` tags, add the App to its bypass list.
 
 - Several packages per repo (release-please manifest), with one tag per package.
 - Pre-release versions (`1.0.0-beta.1`) and `bump-minor-pre-major` for 0.x projects.
-- Publishing to NuGet from the release (nuget-publish). For npm, see
-  [npm-publish](npm-publish.md#after-releaseyml-same-run).
+- For publishing from the release, see [npm-publish](npm-publish.md#after-releaseyml-same-run)
+  and [nuget-publish](nuget-publish.md#after-releaseyml-same-run).

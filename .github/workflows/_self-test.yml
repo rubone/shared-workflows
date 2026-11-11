@@ -528,3 +528,58 @@ jobs:
       working_directory: tests/fixtures/npm-package
       tag: v1.0.0
       dry_run: true
+
+  # Smoke test of call mode: packs tests/fixtures/dotnet (Fixture.Lib; the test project isn't
+  # packable) with the version from the tag, without pushing: one plain call to nuget.org
+  # (no NUGET_USER here, so it only warns) whose outputs are checked below, and a matrix with
+  # GitHub Packages and the repo root (no solution: skipped). Different registries and
+  # folders keep them out of each other's concurrency group.
+  nuget-publish:
+    name: NuGet publish (smoke test, ${{ matrix.case.name }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - { name: github, dir: tests/fixtures/dotnet, registry: github }
+          - { name: root, dir: '.', registry: nugetorg }
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    uses: ./.github/workflows/nuget-publish.yml
+    with:
+      working_directory: ${{ matrix.case.dir }}
+      registry: ${{ matrix.case.registry }}
+      tag: v1.0.0
+      dry_run: true
+
+  nuget-publish-nugetorg:
+    name: NuGet publish (smoke test, nugetorg)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    uses: ./.github/workflows/nuget-publish.yml
+    with:
+      working_directory: tests/fixtures/dotnet
+      tag: lib-v1.2.0-rc.1
+      dry_run: true
+
+  nuget-publish-outputs:
+    name: NuGet publish (smoke test, check outputs)
+    needs: nuget-publish-nugetorg
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the outputs
+        env:
+          VERSION: ${{ needs.nuget-publish-nugetorg.outputs.version }}
+          PACKAGES: ${{ needs.nuget-publish-nugetorg.outputs.packages }}
+          PUBLISHED: ${{ needs.nuget-publish-nugetorg.outputs.published }}
+        run: |
+          echo "version=${VERSION} packages=${PACKAGES} published=${PUBLISHED}"
+          [ "${VERSION}" = 1.2.0-rc.1 ] || { echo "::error::Expected the version from the tag."; exit 1; }
+          [ "${PACKAGES}" = Fixture.Lib.1.2.0-rc.1.nupkg ] || { echo "::error::Expected only Fixture.Lib (the test project isn't packable)."; exit 1; }
+          [ "${PUBLISHED}" = false ] || { echo "::error::A dry run must not publish."; exit 1; }

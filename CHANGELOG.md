@@ -28,6 +28,15 @@ changes to inputs, secrets or behavior require a new major version.
   `pnpm/action-setup` v6.1.0 pinned by SHA; npm 11.20.0 when the bundled npm is older than
   11.5.1. Outputs `published`, `name`, `version`, `dist_tag`. Copy and call modes.
 - `tests/fixtures/npm-package`: scoped package for npm-publish's self-test (dry runs only).
+- `nuget-publish.yml`: packs the .NET projects of a solution and pushes them to nuget.org or
+  GitHub Packages when a release is published. The version comes from the release tag
+  (`-p:Version`), so projects don't need a `<Version>`; a package with another version (a
+  hard-coded `<PackageVersion>`) fails the run.
+  Symbol packages (`.snupkg`) for nuget.org, deterministic builds, `RepositoryUrl` for
+  GitHub Packages, and `--skip-duplicate` so re-runs are safe. nuget.org: trusted
+  publishing with `NuGet/login` v1.2.0 (OIDC, `NUGET_USER`) or a `NUGET_API_KEY` secret;
+  GitHub Packages: `GITHUB_TOKEN`. Dry-run mode packs only. Uses `actions/setup-dotnet`
+  v6.0.0. Outputs `published`, `version`, `packages`. Copy and call modes.
 
 ## [1.1.0] - 2026-11-10
 
