@@ -1,0 +1,52 @@
+# Call mode: copy to .github/workflows/nuget-publish.yml in the project repo.
+# To not depend on this repo (or if the org blocks external workflows), copy
+# .github/workflows/nuget-publish.yml instead (copy mode).
+# Docs: https://github.com/rubone/shared-workflows/blob/main/docs/nuget-publish.md
+name: NuGet publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack only, without pushing."
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  publish:
+    # The reusable workflow's jobs can't get more permissions than the caller grants.
+    permissions:
+      contents: read
+      id-token: write    # nuget.org trusted publishing
+      packages: write    # GitHub Packages
+    uses: rubone/shared-workflows/.github/workflows/nuget-publish.yml@v1
+    with:
+      working_directory: '.'                 # folder with the solution
+      registry: 'nugetorg'                   # or 'github' (GitHub Packages)
+      nuget_user: ${{ vars.NUGET_USER }}     # nuget.org profile name (trusted publishing)
+      dry_run: ${{ inputs.dry_run || false }}
+    # Only with an API key instead of trusted publishing:
+    # secrets:
+    #   NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+
+# Or publish in the same run as release.yml (works with GITHUB_TOKEN releases):
+#
+# on:
+#   push:
+#     branches: [main]
+# jobs:
+#   release:
+#     permissions: { contents: write, pull-requests: write, issues: write }
+#     uses: rubone/shared-workflows/.github/workflows/release.yml@v1
+#   publish:
+#     needs: release
+#     if: needs.release.outputs.release_created == 'true'
+#     permissions: { contents: read, id-token: write, packages: write }
+#     uses: rubone/shared-workflows/.github/workflows/nuget-publish.yml@v1
+#     with:
+#       tag: ${{ needs.release.outputs.tag_name }}
+#       nuget_user: ${{ vars.NUGET_USER }}

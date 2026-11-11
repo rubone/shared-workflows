@@ -1,0 +1,433 @@
+# NuGet publish: packs the .NET projects of a solution and pushes them to nuget.org or
+# GitHub Packages when a release is published (release.yml creates it from the release PR).
+#
+#   - nuget.org: trusted publishing (OIDC with NuGet/login, no stored key) when NUGET_USER is
+#     set, or a NUGET_API_KEY secret.
+#   - GitHub Packages: GITHUB_TOKEN.
+#
+# The version comes from the release tag (v1.2.3 → 1.2.3), passed to dotnet pack as
+# -p:Version, so the projects don't need a <Version>. Packages already in the feed are
+# skipped (--skip-duplicate), so re-running is safe. Only packable projects are packed:
+# test projects and those with <IsPackable>false</IsPackable> are left out. Symbol packages
+# (.snupkg) go to nuget.org too. Without a solution or project, it skips with a warning.
+#
+# Note: a release created with GITHUB_TOKEN doesn't trigger workflows. With release.yml, use
+# its GitHub App option, or call this workflow from the same run (see the docs).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      3. nuget.org: add a trusted publishing policy for this repo and this file's name
+#         (nuget-publish.yml) and set the NUGET_USER variable, or set the NUGET_API_KEY secret.
+#      The release / workflow_dispatch triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        publish:
+#          permissions: { contents: read, id-token: write, packages: write }
+#          uses: rubone/shared-workflows/.github/workflows/nuget-publish.yml@v1
+#          with:
+#            nuget_user: ${{ vars.NUGET_USER }}
+#      Inputs override the `env:` values below; the caller defines the trigger.
+#      Outputs: published, version, packages.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/nuget-publish.md
+name: NuGet publish
+
+on:
+  # A) Copy mode triggers.
+  release:
+    types: [published]
+  workflow_dispatch:
+    # Run it from the release tag ("Use workflow from" → Tags): the version comes from it.
+    inputs:
+      dry_run:
+        description: "Pack only, without pushing."
+        type: boolean
+        required: false
+        default: false
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder with the solution, relative to the repo root. Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      solution:
+        description: "Solution or project file to pack, relative to working_directory. Empty = detect. Overrides env.SOLUTION."
+        type: string
+        required: false
+        default: ''
+      registry:
+        description: "'nugetorg' or 'github' (GitHub Packages). Overrides env.REGISTRY."
+        type: string
+        required: false
+        default: ''
+      tag:
+        description: "Release tag the version comes from (e.g. v1.2.3, or release.yml's tag_name output). Empty = the run's tag."
+        type: string
+        required: false
+        default: ''
+      nuget_user:
+        description: "nuget.org user (profile name, not the email) of the trusted publishing policy. Overrides env.NUGET_USER."
+        type: string
+        required: false
+        default: ''
+      dotnet_version:
+        description: "SDK version when there's no global.json (e.g. '10.0.x'). Overrides env.DOTNET_VERSION."
+        type: string
+        required: false
+        default: ''
+      symbols:
+        description: "'true' = also build and push symbol packages (.snupkg, nuget.org only). Overrides env.SYMBOLS."
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: "true = pack only, without pushing."
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      NUGET_API_KEY:
+        description: "nuget.org API key with push rights. Empty = trusted publishing with nuget_user."
+        required: false
+    outputs:
+      published:
+        description: "'true' when this run pushed at least one new package."
+        value: ${{ jobs.publish.outputs.published }}
+      version:
+        description: "Version packed (from the tag)."
+        value: ${{ jobs.publish.outputs.version }}
+      packages:
+        description: "Package files packed, comma-separated (e.g. MyLib.1.2.3.nupkg)."
+        value: ${{ jobs.publish.outputs.packages }}
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder with the solution, relative to the repo root ('.' = root).
+  WORKING_DIRECTORY: '.'
+  # Solution or project file to pack, relative to WORKING_DIRECTORY. Empty = the only
+  # .slnx/.sln there, else the only project. Set it when the folder has more than one.
+  SOLUTION: ''
+  # 'nugetorg' = nuget.org, 'github' = GitHub Packages (nuget.pkg.github.com/<owner>).
+  REGISTRY: 'nugetorg'
+  # nuget.org user (profile name, not the email) that owns the trusted publishing policy.
+  # Empty = use the NUGET_API_KEY secret instead.
+  NUGET_USER: ${{ vars.NUGET_USER }}
+  # SDK version, used when there's no global.json (global.json always wins).
+  DOTNET_VERSION: '10.0.x'
+  # 'true' = symbol packages (.snupkg) for debugging, pushed to nuget.org's symbol server.
+  # GitHub Packages doesn't take them.
+  SYMBOLS: 'true'
+
+jobs:
+  publish:
+    name: Publish NuGet packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write    # nuget.org trusted publishing
+      packages: write    # GitHub Packages
+    # One publish at a time per folder, registry and version; never cancelled halfway.
+    # The version is in the group because GitHub keeps only one waiting run per group and
+    # cancels it when another arrives: back-to-back releases would skip a version.
+    concurrency:
+      group: nuget-publish-${{ github.repository }}-${{ inputs.registry }}-${{ inputs.working_directory }}-${{ inputs.tag || github.event.release.tag_name || github.ref }}
+      cancel-in-progress: false
+    env:
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+    outputs:
+      published: ${{ steps.push.outputs.published || 'false' }}
+      version: ${{ steps.detect.outputs.version }}
+      packages: ${{ steps.pack.outputs.packages }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect project
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          SOLUTION: ${{ inputs.solution || env.SOLUTION }}
+          REGISTRY: ${{ inputs.registry || env.REGISTRY }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+          NUGET_USER: ${{ inputs.nuget_user || env.NUGET_USER }}
+          DOTNET_VERSION: ${{ inputs.dotnet_version || env.DOTNET_VERSION }}
+          SYMBOLS: ${{ inputs.symbols || env.SYMBOLS }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          HAS_KEY: ${{ secrets.NUGET_API_KEY != '' }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"; dir="${dir#./}"; dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a folder inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          case "${SYMBOLS}" in true|false) ;; *)
+            echo "::error::SYMBOLS must be 'true' or 'false'. Got: '${SYMBOLS}'."; exit 1 ;;
+          esac
+
+          # Files directly in the folder matching the patterns, one per line.
+          files_in() { local d=$1; shift; (cd "${d}" 2>/dev/null && for p in "$@"; do compgen -G "${p}" || true; done); }
+          if [ ! -d "${dir}" ]; then
+            echo "::warning::Folder '${dir}' doesn't exist; nothing to publish. Check WORKING_DIRECTORY."
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ -n "${SOLUTION}" ]; then
+            target="${SOLUTION}"
+            [ -f "${dir}/${target}" ] || { echo "::error::SOLUTION '${target}' not found in '${dir}'."; exit 1; }
+          else
+            mapfile -t slns < <(files_in "${dir}" '*.slnx' '*.sln')
+            mapfile -t projs < <(files_in "${dir}" '*.csproj' '*.fsproj' '*.vbproj')
+            if [ "${#slns[@]}" -gt 1 ]; then
+              echo "::error::More than one solution in '${dir}' (${slns[*]}). Set SOLUTION to the one to pack."; exit 1
+            elif [ "${#slns[@]}" -eq 1 ]; then
+              target="${slns[0]}"
+            elif [ "${#projs[@]}" -gt 1 ]; then
+              echo "::error::No solution and more than one project in '${dir}' (${projs[*]}). Set SOLUTION."; exit 1
+            elif [ "${#projs[@]}" -eq 1 ]; then
+              target="${projs[0]}"
+            else
+              echo "::warning::No .slnx, .sln or project file in '${dir}'; nothing to publish. If the solution is in a subfolder, set WORKING_DIRECTORY."
+              echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          fi
+
+          # The version comes from the release tag: v1.2.3, 1.2.3, or with a prefix (pkg-v1.2.3).
+          semver='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?'
+          if [ -z "${TAG}" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          if [ -z "${TAG}" ]; then
+            echo "::error::No release tag to take the version from. Run it from a release, from a tag (manual runs: \"Use workflow from\" → Tags), or pass the tag input."
+            exit 1
+          fi
+          if ! [[ "${TAG}" =~ ^(.*[-/@])?v?(${semver})$ ]]; then
+            echo "::error::Tag '${TAG}' doesn't end in a version (v1.2.3)."; exit 1
+          fi
+          version="${BASH_REMATCH[2]}"
+
+          # A plain <Version> in the projects that differs from the tag is overridden: say so.
+          while IFS= read -r f; do
+            v=$(grep -oE '<(Version|VersionPrefix)>[0-9]+\.[0-9]+\.[0-9]+[^<]*</' "${f}" | head -n1 | sed -E 's#<[^>]+>([^<]*)</#\1#') || true
+            if [ -n "${v}" ] && [ "${v}" != "${version}" ]; then
+              echo "::warning::${f} has version ${v}; packing ${version} from the tag ${TAG}. release.yml keeps them in sync."
+            fi
+          done < <(find "${dir}" -maxdepth 3 \( -name bin -o -name obj -o -name .git -o -name node_modules \) -prune \
+                     -o -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' -o -name Directory.Build.props \) -print)
+
+          case "${REGISTRY}" in
+            nugetorg)
+              source=https://api.nuget.org/v3/index.json
+              if [ "${HAS_KEY}" = true ]; then
+                auth=api-key
+              elif [ -n "${NUGET_USER}" ]; then
+                auth=oidc
+                if [[ "${NUGET_USER}" == *@* ]]; then
+                  echo "::error::NUGET_USER is the nuget.org profile name, not the email. Got: '${NUGET_USER}'."; exit 1
+                fi
+              else
+                auth=none
+                msg="nuget.org needs the NUGET_USER variable (trusted publishing) or the NUGET_API_KEY secret."
+                if [ "${DRY_RUN}" = true ]; then echo "::warning::${msg}"; else echo "::error::${msg}"; exit 1; fi
+              fi ;;
+            github)
+              source="https://nuget.pkg.github.com/${GITHUB_REPOSITORY_OWNER}/index.json"
+              auth=github-token
+              # GitHub Packages doesn't take symbol packages.
+              SYMBOLS=false ;;
+            *) echo "::error::REGISTRY must be 'nugetorg' or 'github'. Got: '${REGISTRY}'."; exit 1 ;;
+          esac
+
+          # global.json: in the folder or the repo root. dotnet obeys it, so it sets the SDK.
+          global_json=""
+          for f in "${dir}/global.json" "global.json"; do
+            if [ -f "${f}" ]; then global_json="${f}"; break; fi
+          done
+          if [ -z "${global_json}" ] && [ -z "${DOTNET_VERSION}" ]; then
+            echo "::error::No global.json and DOTNET_VERSION is empty: set one of them (e.g. '10.0.x')."; exit 1
+          fi
+          locked=false
+          [ -n "$(find "${dir}" \( -name bin -o -name obj -o -name .git \) -prune -o -name packages.lock.json -print -quit)" ] && locked=true
+
+          {
+            echo "found=true"
+            echo "dir=${dir}"
+            echo "target=${target}"
+            echo "version=${version}"
+            echo "tag=${TAG}"
+            echo "registry=${REGISTRY}"
+            echo "source=${source}"
+            echo "auth=${auth}"
+            echo "nuget_user=${NUGET_USER}"
+            echo "symbols=${SYMBOLS}"
+            echo "global_json=${global_json}"
+            echo "dotnet_version=$([ -n "${global_json}" ] || printf '%s' "${DOTNET_VERSION}")"
+            echo "locked=${locked}"
+            echo "dry_run=${DRY_RUN}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Project: ${dir}/${target} | version ${version} (tag ${TAG}) → ${REGISTRY} | auth: ${auth} | symbols: ${SYMBOLS} | dry run: ${DRY_RUN}"
+
+      - name: Set up .NET
+        id: dotnet
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: ${{ steps.detect.outputs.dotnet_version }}
+          global-json-file: ${{ steps.detect.outputs.global_json }}
+
+      - name: Restore
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TARGET: ${{ steps.detect.outputs.target }}
+          LOCKED: ${{ steps.detect.outputs.locked }}
+        run: |
+          args=()
+          [ "${LOCKED}" = true ] && args+=(--locked-mode)
+          dotnet restore "${TARGET}" ${args[@]+"${args[@]}"}
+
+      - name: Pack
+        id: pack
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          TARGET: ${{ steps.detect.outputs.target }}
+          VERSION: ${{ steps.detect.outputs.version }}
+          SYMBOLS: ${{ steps.detect.outputs.symbols }}
+          REGISTRY: ${{ steps.detect.outputs.registry }}
+        run: |
+          set -euo pipefail
+          OUT="${RUNNER_TEMP}/nuget-publish"
+          rm -rf "${OUT}"; mkdir -p "${OUT}"
+          # ContinuousIntegrationBuild: deterministic build with Source Link paths.
+          args=(--no-restore --configuration Release --output "${OUT}"
+                "-p:Version=${VERSION}" -p:ContinuousIntegrationBuild=true)
+          if [ "${SYMBOLS}" = true ]; then
+            args+=(-p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg)
+          fi
+          # GitHub Packages links each package to the repo through RepositoryUrl.
+          if [ "${REGISTRY}" = github ]; then
+            args+=("-p:RepositoryUrl=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" -p:RepositoryType=git)
+          fi
+          dotnet pack "${TARGET}" "${args[@]}"
+
+          mapfile -t pkgs < <(cd "${OUT}" && compgen -G '*.nupkg' | sort)
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "::error::dotnet pack produced no package: no packable project in ${TARGET}. Test projects and those with <IsPackable>false</IsPackable> are skipped."
+            exit 1
+          fi
+          # Every package must carry the tag's version (a hard-coded PackageVersion would win).
+          # File names leave out build metadata (1.2.3+abc → 1.2.3).
+          want="${VERSION%%+*}"; want="${want,,}"
+          for p in "${pkgs[@]}"; do
+            if [[ "${p,,}" != *".${want}.nupkg" ]]; then
+              echo "::error::${p} doesn't have the version ${VERSION}. Remove <PackageVersion> from that project: the version comes from the tag."
+              exit 1
+            fi
+          done
+          echo "Packed: ${pkgs[*]}"
+          ls -l "${OUT}"
+          {
+            echo "dir=${OUT}"
+            echo "packages=$(IFS=,; echo "${pkgs[*]}")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to nuget.org (trusted publishing)
+        id: login
+        if: steps.detect.outputs.auth == 'oidc' && steps.detect.outputs.dry_run != 'true'
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ steps.detect.outputs.nuget_user }}
+
+      - name: Push
+        id: push
+        if: steps.detect.outputs.found == 'true' && steps.detect.outputs.dry_run != 'true'
+        env:
+          # The short-lived key from NuGet/login (valid 1 hour), the secret, or GITHUB_TOKEN.
+          API_KEY: ${{ steps.login.outputs.NUGET_API_KEY || (steps.detect.outputs.auth == 'github-token' && github.token) || secrets.NUGET_API_KEY }}
+          SOURCE: ${{ steps.detect.outputs.source }}
+          OUT: ${{ steps.pack.outputs.dir }}
+          PACKAGES: ${{ steps.pack.outputs.packages }}
+          SYMBOLS: ${{ steps.detect.outputs.symbols }}
+        run: |
+          set -euo pipefail
+          IFS=, read -r -a pkgs <<< "${PACKAGES}"
+          args=(--source "${SOURCE}" --api-key "${API_KEY}" --skip-duplicate)
+          # The .snupkg next to each .nupkg is pushed with it, unless --no-symbols.
+          [ "${SYMBOLS}" = true ] || args+=(--no-symbols)
+          pushed=0; : > "${RUNNER_TEMP}/nuget-results"
+          for p in "${pkgs[@]}"; do
+            log=$(dotnet nuget push "${OUT}/${p}" "${args[@]}" 2>&1) || { echo "${log}"; echo "::error::Pushing ${p} failed."; exit 1; }
+            echo "${log}"
+            # --skip-duplicate turns the feed's 409 into a warning, e.g. "Conflict … The feed
+            # already contains …" (local folder feeds skip silently instead).
+            if grep -qiE 'already (exists|contains)|Conflict' <<< "${log}"; then
+              echo "${p}|skipped (already in the feed)" >> "${RUNNER_TEMP}/nuget-results"
+              echo "::notice::${p} is already in the feed; skipped."
+            else
+              echo "${p}|pushed" >> "${RUNNER_TEMP}/nuget-results"
+              pushed=$((pushed + 1))
+            fi
+          done
+          echo "published=$([ "${pushed}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always() && steps.detect.outputs.found == 'true'
+        env:
+          VERSION: ${{ steps.detect.outputs.version }}
+          TAG: ${{ steps.detect.outputs.tag }}
+          REGISTRY: ${{ steps.detect.outputs.registry }}
+          AUTH: ${{ steps.detect.outputs.auth }}
+          SYMBOLS: ${{ steps.detect.outputs.symbols }}
+          DRY_RUN: ${{ steps.detect.outputs.dry_run }}
+          PACKAGES: ${{ steps.pack.outputs.packages }}
+          OUTCOME: ${{ steps.push.outcome }}
+        run: |
+          if [ "${REGISTRY}" = github ]; then where="GitHub Packages"; else where="nuget.org"; fi
+          case "${AUTH}" in
+            oidc) auth_text="trusted publishing (OIDC)" ;;
+            api-key) auth_text="NUGET_API_KEY" ;;
+            github-token) auth_text="GITHUB_TOKEN" ;;
+            *) auth_text="none" ;;
+          esac
+          {
+            echo "### NuGet publish: ${VERSION} (\`${TAG}\`)"
+            echo
+            if [ "${DRY_RUN}" = true ]; then
+              echo "Dry run: packed, not pushed to ${where}."; echo
+            elif [ "${OUTCOME}" != success ]; then
+              echo "❌ Push to ${where}: ${OUTCOME:-not reached}; see the log."; echo
+            fi
+            echo "| Package | Result |"
+            echo "|---|---|"
+            if [ -f "${RUNNER_TEMP}/nuget-results" ]; then
+              while IFS='|' read -r p r; do
+                if [ "${r}" = pushed ] && [ "${REGISTRY}" = nugetorg ]; then
+                  id="${p%."${VERSION%%+*}".nupkg}"
+                  r="✅ [pushed](https://www.nuget.org/packages/${id}/${VERSION%%+*})"
+                elif [ "${r}" = pushed ]; then
+                  r="✅ pushed"
+                fi
+                echo "| \`${p}\` | ${r} |"
+              done < "${RUNNER_TEMP}/nuget-results"
+            else
+              IFS=, read -r -a pkgs <<< "${PACKAGES}"
+              for p in "${pkgs[@]}"; do echo "| \`${p}\` | packed |"; done
+            fi
+            echo
+            echo "Auth: ${auth_text} · symbols: ${SYMBOLS}"
+            if [ "${REGISTRY}" = nugetorg ] && [ "${DRY_RUN}" != true ]; then
+              echo
+              echo "nuget.org validates new versions before listing them: they can take a few minutes to appear."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
