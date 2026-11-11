@@ -143,9 +143,11 @@ jobs:
       contents: read
       id-token: write    # npmjs trusted publishing and provenance
       packages: write    # GitHub Packages
-    # One publish at a time per package; never cancelled halfway.
+    # One publish at a time per package, registry and version; never cancelled halfway.
+    # The version is in the group because GitHub keeps only one waiting run per group and
+    # cancels it when another arrives: back-to-back releases would skip a version.
     concurrency:
-      group: npm-publish-${{ github.repository }}-${{ inputs.working_directory || github.ref }}
+      group: npm-publish-${{ github.repository }}-${{ inputs.registry }}-${{ inputs.working_directory }}-${{ inputs.tag || github.event.release.tag_name || github.ref }}
       cancel-in-progress: false
     outputs:
       published: ${{ steps.publish.outputs.published || 'false' }}

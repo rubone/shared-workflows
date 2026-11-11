@@ -164,7 +164,8 @@ publisher expires if nothing is published with it within 2 days.
 
 ## How it works
 
-One job, **Publish npm package**, one run at a time per package and never cancelled:
+One job, **Publish npm package**, one run at a time per package, registry and version, and
+never cancelled:
 
 1. **Detect package**: reads `package.json`, checks the version against the tag, picks the
    dist-tag and the authentication, and detects the package manager (from the lockfile,
