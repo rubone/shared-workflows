@@ -470,9 +470,11 @@ jobs:
           [ "${ROOT}/${NODE}/${DOTNET}" = simple/node/dotnet ] || { echo "::error::Expected simple/node/dotnet."; exit 1; }
           [ -z "${CREATED}" ] || { echo "::error::A pull request must not release."; exit 1; }
 
-  # Smoke test of call mode: dry runs on tests/fixtures/npm-package (a scoped package, never
-  # published) to npmjs (trusted publishing path) and to GitHub Packages, with the tag
-  # check; plus the repo root (no package.json) and a private package, which both skip.
+  # Smoke test of call mode: a dry run of tests/fixtures/npm-package (a scoped package, never
+  # published) to GitHub Packages, with the tag check; plus the repo root (no package.json)
+  # and a private package, which both skip. The npmjs dry run (trusted publishing path) is
+  # npm-publish-npmjs-outputs below: two calls with the same package, registry and tag
+  # share a concurrency group, and GitHub cancels the one left waiting.
   # The nested job asks for id-token and packages, so the calling jobs must grant them.
   npm-publish:
     name: npm publish (smoke test, ${{ matrix.case.name }})
@@ -481,7 +483,6 @@ jobs:
       fail-fast: false
       matrix:
         case:
-          - { name: npmjs, dir: tests/fixtures/npm-package, registry: npmjs }
           - { name: github, dir: tests/fixtures/npm-package, registry: github }
           - { name: root, dir: '.', registry: npmjs }
           - { name: private, dir: tests/fixtures/node-npm, registry: npmjs }
