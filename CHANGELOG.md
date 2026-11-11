@@ -6,6 +6,8 @@ changes to inputs, secrets or behavior require a new major version.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-11
+
 ### Added
 - `release.yml`: automated releases with `googleapis/release-please-action` v5.0.0 pinned by
   SHA. Each push to the default branch opens or updates a release PR with the next version
@@ -160,6 +162,7 @@ changes to inputs, secrets or behavior require a new major version.
 - `_self-test.yml`: runs actionlint and a smoke test of the reusable workflows on every PR.
 - `.gitignore` and this changelog.
 
-[Unreleased]: https://github.com/rubone/shared-workflows/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/rubone/shared-workflows/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/rubone/shared-workflows/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/rubone/shared-workflows/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rubone/shared-workflows/releases/tag/v1.0.0
