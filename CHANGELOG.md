@@ -17,6 +17,17 @@ changes to inputs, secrets or behavior require a new major version.
   `WORKING_DIRECTORY` and moving the major tag (`v1`). Outputs `release_created`, `tag_name`,
   `version`, `major`, `pr`. Skipped in this repo, which releases by hand. Copy and call
   modes.
+- `npm-publish.yml`: publishes an npm package to npmjs.com or GitHub Packages when a release is
+  published. Checks that `package.json`'s version matches the release tag, installs from the
+  lockfile (npm, pnpm, Yarn 1 or Yarn 2+), runs the build script, packs with the package
+  manager (`workspace:` versions replaced) and publishes the tarball with `npm publish`.
+  npmjs.com: trusted publishing (OIDC) by default, with automatic provenance from public
+  repos, or an `NPM_TOKEN` secret; GitHub Packages: `GITHUB_TOKEN`. dist-tag from the
+  prerelease id (`1.0.0-beta.1` → `beta`), versions already in the registry are skipped, and
+  `private` packages skip with a warning. Dry-run mode. Uses `actions/setup-node` v7.1.0 and
+  `pnpm/action-setup` v6.1.0 pinned by SHA; npm 11.20.0 when the bundled npm is older than
+  11.5.1. Outputs `published`, `name`, `version`, `dist_tag`. Copy and call modes.
+- `tests/fixtures/npm-package`: scoped package for npm-publish's self-test (dry runs only).
 
 ## [1.1.0] - 2026-11-10
 

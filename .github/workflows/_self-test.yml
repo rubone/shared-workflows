@@ -469,3 +469,61 @@ jobs:
           echo "root=${ROOT} node=${NODE} dotnet=${DOTNET}"
           [ "${ROOT}/${NODE}/${DOTNET}" = simple/node/dotnet ] || { echo "::error::Expected simple/node/dotnet."; exit 1; }
           [ -z "${CREATED}" ] || { echo "::error::A pull request must not release."; exit 1; }
+
+  # Smoke test of call mode: dry runs on tests/fixtures/npm-package (a scoped package, never
+  # published) to npmjs (trusted publishing path) and to GitHub Packages, with the tag
+  # check; plus the repo root (no package.json) and a private package, which both skip.
+  # The nested job asks for id-token and packages, so the calling jobs must grant them.
+  npm-publish:
+    name: npm publish (smoke test, ${{ matrix.case.name }})
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - { name: npmjs, dir: tests/fixtures/npm-package, registry: npmjs }
+          - { name: github, dir: tests/fixtures/npm-package, registry: github }
+          - { name: root, dir: '.', registry: npmjs }
+          - { name: private, dir: tests/fixtures/node-npm, registry: npmjs }
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    uses: ./.github/workflows/npm-publish.yml
+    with:
+      working_directory: ${{ matrix.case.dir }}
+      registry: ${{ matrix.case.registry }}
+      tag: v1.0.0
+      dry_run: true
+
+  npm-publish-outputs:
+    name: npm publish (smoke test, check outputs)
+    needs: npm-publish-npmjs-outputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the outputs
+        env:
+          NAME: ${{ needs.npm-publish-npmjs-outputs.outputs.name }}
+          VERSION: ${{ needs.npm-publish-npmjs-outputs.outputs.version }}
+          DIST_TAG: ${{ needs.npm-publish-npmjs-outputs.outputs.dist_tag }}
+          PUBLISHED: ${{ needs.npm-publish-npmjs-outputs.outputs.published }}
+        run: |
+          echo "name=${NAME} version=${VERSION} dist_tag=${DIST_TAG} published=${PUBLISHED}"
+          [ "${NAME}@${VERSION}" = "@rubone/shared-workflows-npm-fixture@1.0.0" ] || { echo "::error::Unexpected package."; exit 1; }
+          [ "${DIST_TAG}" = latest ] || { echo "::error::Expected dist-tag latest."; exit 1; }
+          [ "${PUBLISHED}" = false ] || { echo "::error::A dry run must not publish."; exit 1; }
+
+  # Outputs of a matrix call are ambiguous, so one more plain call feeds the check above.
+  npm-publish-npmjs-outputs:
+    name: npm publish (smoke test, outputs)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    uses: ./.github/workflows/npm-publish.yml
+    with:
+      working_directory: tests/fixtures/npm-package
+      tag: v1.0.0
+      dry_run: true

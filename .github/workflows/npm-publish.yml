@@ -1,0 +1,584 @@
+# npm publish: builds an npm package and publishes it to npmjs.com or GitHub Packages when a
+# release is published (release.yml creates it from the release PR).
+#
+#   - npmjs.com: trusted publishing (OIDC, no stored token) by default, with provenance from
+#     public repos. Or an NPM_TOKEN secret.
+#   - GitHub Packages: GITHUB_TOKEN. The package must be scoped to the repo owner (@owner/name).
+#
+# The version published is the one in package.json, which must match the release tag
+# (v1.2.3 → 1.2.3). Prereleases (1.2.3-beta.1) get the dist-tag `beta` instead of `latest`.
+# A version already in the registry is skipped, so re-running is safe. A package.json with
+# "private": true, or none, skips with a warning (run stays green).
+#
+# Detected like node-ci: package manager from the lockfile (npm, pnpm, Yarn 1, Yarn 2+) and
+# the Node version. Runs the `build` script if there is one, packs with the package manager
+# (so pnpm/Yarn `workspace:` versions are replaced) and publishes that tarball with npm.
+#
+# Note: a release created with GITHUB_TOKEN doesn't trigger workflows. With release.yml, use
+# its GitHub App option, or call this workflow from the same run (see the docs).
+#
+# Two ways to use this same file:
+#
+#   A) COPY (works in any repo, any org)
+#      1. Copy this file as-is to .github/workflows/ in the target repo.
+#      2. Edit the values under `env:` below if the defaults don't fit.
+#      3. npmjs.com: add this repo and this file's name (npm-publish.yml) as a trusted
+#         publisher of the package, or set the NPM_TOKEN secret.
+#      The release / workflow_dispatch triggers run it; `workflow_call` is ignored.
+#
+#   B) CALL (any repo, any org: rubone/shared-workflows is public)
+#      jobs:
+#        publish:
+#          permissions: { contents: read, id-token: write, packages: write }
+#          uses: rubone/shared-workflows/.github/workflows/npm-publish.yml@v1
+#      Inputs override the `env:` values below; the caller defines the trigger. For trusted
+#      publishing, npm checks the CALLER's file name: configure that one on npmjs.com.
+#      Outputs: published, name, version, dist_tag.
+#
+# Full docs: https://github.com/rubone/shared-workflows/blob/main/docs/npm-publish.md
+name: npm publish
+
+on:
+  # A) Copy mode triggers.
+  release:
+    types: [published]
+  workflow_dispatch:
+    # Run it from the release tag ("Use workflow from" → Tags) to publish that version again.
+    inputs:
+      dry_run:
+        description: "Pack and run npm publish --dry-run, without publishing."
+        type: boolean
+        required: false
+        default: false
+  # B) Call mode: reusable workflow.
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Folder with the package's package.json, relative to the repo root. Overrides env.WORKING_DIRECTORY."
+        type: string
+        required: false
+        default: ''
+      registry:
+        description: "'npmjs' or 'github' (GitHub Packages). Overrides env.REGISTRY."
+        type: string
+        required: false
+        default: ''
+      tag:
+        description: "Release tag (e.g. v1.2.3, or release.yml's tag_name output) that package.json's version must match. Empty = the run's tag, if any."
+        type: string
+        required: false
+        default: ''
+      dist_tag:
+        description: "npm dist-tag. Empty = 'latest', or the prerelease id (beta, rc…) for prereleases. Overrides env.DIST_TAG."
+        type: string
+        required: false
+        default: ''
+      access:
+        description: "'public' or 'restricted' (npmjs only). Overrides env.ACCESS."
+        type: string
+        required: false
+        default: ''
+      node_version:
+        description: "Node version. Empty = from .nvmrc, .node-version or package.json. Overrides env.NODE_VERSION."
+        type: string
+        required: false
+        default: ''
+      build_script:
+        description: "Build script names to try, in order; 'off' = skip. Overrides env.BUILD_SCRIPT."
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: "true = pack and run npm publish --dry-run, without publishing."
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      NPM_TOKEN:
+        description: "npmjs.com granular access token with publish rights. Empty = trusted publishing (OIDC)."
+        required: false
+    outputs:
+      published:
+        description: "'true' when this run published the package."
+        value: ${{ jobs.publish.outputs.published }}
+      name:
+        description: "Package name."
+        value: ${{ jobs.publish.outputs.name }}
+      version:
+        description: "Version published (or that would be, in a dry run)."
+        value: ${{ jobs.publish.outputs.version }}
+      dist_tag:
+        description: "dist-tag used."
+        value: ${{ jobs.publish.outputs.dist_tag }}
+
+permissions: {}
+
+# >>> Edit these when copying the file (copy mode). In call mode, inputs take precedence.
+env:
+  # Folder with the package's package.json, relative to the repo root ('.' = root). For a
+  # repo with several packages, copy or call the workflow once per package.
+  WORKING_DIRECTORY: '.'
+  # 'npmjs' = registry.npmjs.org, 'github' = GitHub Packages (npm.pkg.github.com).
+  REGISTRY: 'npmjs'
+  # npm dist-tag. Empty = 'latest', or the prerelease id for prereleases (1.0.0-rc.1 → rc).
+  DIST_TAG: ''
+  # npmjs only. 'public' is needed for the first publish of a public scoped package
+  # (@scope/name); 'restricted' = private package (paid npm plan). GitHub Packages
+  # follows the repo's visibility.
+  ACCESS: 'public'
+  # Node version. Empty = from .nvmrc / .node-version / package.json, else the latest LTS.
+  NODE_VERSION: ''
+  # pnpm only, used when package.json has no "packageManager": "pnpm@x.y.z" field.
+  PNPM_VERSION: '10'
+  # Build scripts to try before packing, comma-separated: the first one that exists runs.
+  # 'off' = none (prepack/prepare scripts still run when packing).
+  BUILD_SCRIPT: 'build'
+
+jobs:
+  publish:
+    name: Publish npm package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write    # npmjs trusted publishing and provenance
+      packages: write    # GitHub Packages
+    # One publish at a time per package; never cancelled halfway.
+    concurrency:
+      group: npm-publish-${{ github.repository }}-${{ inputs.working_directory || github.ref }}
+      cancel-in-progress: false
+    outputs:
+      published: ${{ steps.publish.outputs.published || 'false' }}
+      name: ${{ steps.detect.outputs.name }}
+      version: ${{ steps.detect.outputs.version }}
+      dist_tag: ${{ steps.detect.outputs.dist_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect package
+        id: detect
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory || env.WORKING_DIRECTORY }}
+          REGISTRY: ${{ inputs.registry || env.REGISTRY }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+          DIST_TAG: ${{ inputs.dist_tag || env.DIST_TAG }}
+          ACCESS: ${{ inputs.access || env.ACCESS }}
+          NODE_VERSION: ${{ inputs.node_version || env.NODE_VERSION }}
+          PNPM_VERSION: ${{ env.PNPM_VERSION }}
+          BUILD_SCRIPT: ${{ inputs.build_script || env.BUILD_SCRIPT }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          HAS_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+
+          dir="${WORKING_DIRECTORY%/}"; dir="${dir#./}"; dir="${dir:-.}"
+          if [[ "${dir}" == /* || "/${dir}/" == */../* ]]; then
+            echo "::error::WORKING_DIRECTORY must be a folder inside the repo, relative to its root. Got: '${WORKING_DIRECTORY}'."
+            exit 1
+          fi
+          pkg="${dir}/package.json"
+          if [ ! -f "${pkg}" ]; then
+            echo "::warning::No package.json in '${dir}'; nothing to publish. If the package is in a subfolder, set WORKING_DIRECTORY."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! jq empty "${pkg}" 2>/dev/null; then
+            echo "::error::${pkg} isn't valid JSON."; exit 1
+          fi
+          if [ "$(jq -r '.private // false' "${pkg}")" = true ]; then
+            echo "::warning::${pkg} has \"private\": true, so npm won't publish it. Remove it to publish the package."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          name=$(jq -r '.name // ""' "${pkg}")
+          version=$(jq -r '.version // ""' "${pkg}")
+          semver='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?'
+          [ -n "${name}" ] || { echo "::error::${pkg} has no \"name\"."; exit 1; }
+          if ! [[ "${version}" =~ ^${semver}$ ]]; then
+            echo "::error::${pkg} has no valid \"version\" (got '${version}'). release.yml keeps it up to date."; exit 1
+          fi
+
+          # The version must be the release's: v1.2.3, 1.2.3, or with a prefix (pkg-v1.2.3).
+          if [ -z "${TAG}" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          if [ -n "${TAG}" ]; then
+            if ! [[ "${TAG}" =~ ^(.*[-/@])?v?(${semver})$ ]]; then
+              echo "::error::Tag '${TAG}' doesn't end in a version (v1.2.3)."; exit 1
+            fi
+            tag_version="${BASH_REMATCH[2]}"
+            if [ "${tag_version}" != "${version}" ]; then
+              echo "::error::${pkg} has version ${version}, but the tag ${TAG} is ${tag_version}. Update package.json in the release (release.yml does it), or run from the right tag."
+              exit 1
+            fi
+          else
+            echo "::notice::No release tag: publishing the version in package.json (${version})."
+          fi
+
+          case "${REGISTRY}" in
+            npmjs) url=https://registry.npmjs.org/ ;;
+            github)
+              url=https://npm.pkg.github.com/
+              owner="${GITHUB_REPOSITORY_OWNER,,}"
+              if [[ "${name}" != "@${owner}/"* ]]; then
+                echo "::error::GitHub Packages needs the package scoped to the repo owner: \"name\": \"@${owner}/${name##*/}\" (got '${name}')."; exit 1
+              fi ;;
+            *) echo "::error::REGISTRY must be 'npmjs' or 'github'. Got: '${REGISTRY}'."; exit 1 ;;
+          esac
+          pc_registry=$(jq -r '.publishConfig.registry // ""' "${pkg}")
+          if [ -n "${pc_registry}" ] && [ "${pc_registry%/}/" != "${url}" ]; then
+            echo "::error::${pkg} has publishConfig.registry '${pc_registry}', but REGISTRY is '${REGISTRY}' (${url}). Remove it or make them match."; exit 1
+          fi
+          case "${ACCESS}" in public|restricted) ;; *)
+            echo "::error::ACCESS must be 'public' or 'restricted'. Got: '${ACCESS}'."; exit 1 ;;
+          esac
+
+          # dist-tag: explicit, else the prerelease id (1.0.0-beta.1 → beta), else latest.
+          npm_tag="${DIST_TAG}"
+          if [ -z "${npm_tag}" ]; then
+            if [[ "${version}" == *-* ]]; then
+              pre="${version#*-}"; pre="${pre%%+*}"; pre="${pre%%.*}"
+              if [[ "${pre}" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]]; then npm_tag="${pre,,}"; else npm_tag=next; fi
+            else
+              npm_tag=latest
+            fi
+          elif [ "${npm_tag}" = latest ] && [[ "${version}" == *-* ]]; then
+            echo "::warning::Publishing the prerelease ${version} as 'latest': npm install will pick it by default."
+          fi
+          if [[ "${npm_tag}" =~ ^v?[0-9] ]]; then
+            echo "::error::The dist-tag can't look like a version (npm rejects it). Got: '${npm_tag}'."; exit 1
+          fi
+
+          # Authentication and provenance.
+          provenance=false
+          if [ "${REGISTRY}" = github ]; then
+            auth=github-token
+          elif [ "${HAS_TOKEN}" = true ]; then
+            auth=npm-token
+            # With a token, provenance is opt-in; npm only supports it from public repos.
+            [ "${VISIBILITY}" = public ] && provenance=true
+          else
+            auth=oidc   # trusted publishing; npm adds provenance itself from public repos
+          fi
+          # Trusted publishing and provenance check that repository.url is this repo.
+          if [ "${auth}" = oidc ] || [ "${provenance}" = true ]; then
+            repo_url=$(jq -r 'if (.repository | type) == "object" then .repository.url // "" else .repository // "" end' "${pkg}")
+            norm="${repo_url,,}"; norm="${norm#git+}"; norm="${norm%/}"; norm="${norm%.git}"
+            norm="${norm/#git@github.com:/https://github.com/}"
+            norm="${norm/#ssh:\/\/git@github.com\//https://github.com/}"
+            norm="${norm/#git:\/\/github.com\//https://github.com/}"
+            norm="${norm/#github:/https://github.com/}"
+            if [[ "${norm}" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]]; then norm="https://github.com/${norm}"; fi
+            want="${GITHUB_SERVER_URL,,}/${GITHUB_REPOSITORY,,}"
+            if [ "${norm}" != "${want}" ]; then
+              msg="${pkg} needs \"repository\": {\"type\": \"git\", \"url\": \"git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git\"} for trusted publishing and provenance (got '${repo_url}')."
+              if [ "${DRY_RUN}" = true ]; then echo "::warning::${msg}"; else echo "::error::${msg}"; exit 1; fi
+            fi
+          fi
+
+          # Lockfile: in the package folder or, for workspaces, in a parent folder.
+          lockfile=""; d="${dir}"
+          while :; do
+            for f in package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock; do
+              if [ -f "${d}/${f}" ]; then lockfile="${d}/${f}"; break 2; fi
+            done
+            [ "${d}" = "." ] && break
+            d=$(dirname "${d}")
+          done
+          pnpm_ver=""
+          if [ -z "${lockfile}" ]; then
+            if [ "$(jq '(.dependencies // {}) + (.devDependencies // {}) + (.optionalDependencies // {}) | length' "${pkg}")" != 0 ]; then
+              echo "::error::No lockfile (package-lock.json, pnpm-lock.yaml or yarn.lock) in '${dir}' or its parent folders. Commit it, so the release builds with the same versions as CI."
+              exit 1
+            fi
+            root="${dir}"; root_pkg="${pkg}"; pm=npm; install=""
+          else
+            root=$(dirname "${lockfile}")
+            root_pkg="${root}/package.json"; [ -f "${root_pkg}" ] || root_pkg="${pkg}"
+            pm_field=$(jq -r '.packageManager // ""' "${root_pkg}")
+            case "${lockfile##*/}" in
+              package-lock.json|npm-shrinkwrap.json) pm=npm; install="npm ci" ;;
+              pnpm-lock.yaml)
+                pm=pnpm; install="pnpm install --frozen-lockfile"
+                if [[ "${pm_field}" != pnpm@* ]]; then pnpm_ver="${PNPM_VERSION}"; fi ;;
+              yarn.lock)
+                if grep -q '^__metadata:' "${lockfile}"; then
+                  pm=yarn-berry; install="yarn install --immutable"
+                  if [[ "${pm_field}" != yarn@* ]] && ! grep -qs '^yarnPath:' "${root}/.yarnrc.yml"; then
+                    echo "::error::yarn.lock is from Yarn 2+, but ${root_pkg} has no \"packageManager\": \"yarn@x.y.z\" field. Add it (run 'yarn set version stable')."
+                    exit 1
+                  fi
+                else
+                  pm=yarn; install="yarn install --frozen-lockfile"
+                fi ;;
+            esac
+          fi
+          # Pack with the package manager: it replaces workspace: versions and runs prepack.
+          # ${OUT} stays literal: the Pack step sets it.
+          # shellcheck disable=SC2016
+          case "${pm}" in
+            npm)        pack='npm pack --pack-destination "${OUT}"' ;;
+            pnpm)       pack='pnpm pack --pack-destination "${OUT}"' ;;
+            yarn)       pack='yarn pack --filename "${OUT}/package.tgz"' ;;
+            yarn-berry) pack='yarn pack --out "${OUT}/package.tgz"' ;;
+          esac
+
+          # Node version: explicit value, else a version file, else latest LTS.
+          node_version=""; node_file=""
+          if [ -n "${NODE_VERSION}" ]; then
+            node_version="${NODE_VERSION}"
+          else
+            for f in "${dir}/.nvmrc" "${dir}/.node-version" "${root}/.nvmrc" "${root}/.node-version"; do
+              if [ -f "${f}" ]; then node_file="${f}"; break; fi
+            done
+            if [ -z "${node_file}" ] && jq -e '.volta.node // .devEngines.runtime // .engines.node // empty' "${pkg}" >/dev/null; then
+              node_file="${pkg}"
+            fi
+            [ -n "${node_file}" ] || node_version="lts/*"
+          fi
+
+          # First build script of the comma-separated list that package.json defines.
+          build=""
+          if [ "${BUILD_SCRIPT}" != off ]; then
+            for s in ${BUILD_SCRIPT//,/ }; do
+              if jq -e --arg s "${s}" '.scripts[$s] // empty' "${pkg}" >/dev/null; then build="${s}"; break; fi
+            done
+            [ -n "${build}" ] || echo "::notice::No build script (${BUILD_SCRIPT//,/ or }) in ${pkg}; packing as is."
+          fi
+
+          {
+            echo "found=true"
+            echo "dir=${dir}"
+            echo "root=${root}"
+            echo "root_pkg=${root_pkg}"
+            echo "lockfile=${lockfile}"
+            echo "pm=${pm}"
+            echo "install=${install}"
+            echo "pack=${pack}"
+            echo "pnpm_version=${pnpm_ver}"
+            echo "node_version=${node_version}"
+            echo "node_file=${node_file}"
+            echo "build=${build}"
+            echo "name=${name}"
+            echo "version=${version}"
+            echo "dist_tag=${npm_tag}"
+            echo "registry=${REGISTRY}"
+            echo "url=${url}"
+            echo "access=${ACCESS}"
+            echo "auth=${auth}"
+            echo "provenance=${provenance}"
+            echo "dry_run=${DRY_RUN}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Package: ${name}@${version} (${dir}) → ${REGISTRY} as '${npm_tag}' | auth: ${auth} | ${pm} | Node: ${node_version:-from ${node_file}} | dry run: ${DRY_RUN}"
+
+      - name: Set up Node
+        id: node
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.detect.outputs.node_version }}
+          node-version-file: ${{ steps.detect.outputs.node_file }}
+          # No dependency cache: a release build installs from scratch.
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        if: steps.detect.outputs.pm == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ steps.detect.outputs.pnpm_version }}
+          package_json_file: ${{ steps.detect.outputs.root_pkg }}
+
+      - name: Enable Corepack (Yarn 2+)
+        if: steps.detect.outputs.pm == 'yarn-berry'
+        run: |
+          npm install --global corepack@0.36.0
+          corepack enable
+
+      - name: Check Node and npm
+        if: steps.detect.outputs.found == 'true'
+        env:
+          AUTH: ${{ steps.detect.outputs.auth }}
+        run: |
+          set -euo pipefail
+          # True when $1 >= $2 (versions).
+          at_least() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+          node_v=$(node --version); node_v="${node_v#v}"
+          if [ "${AUTH}" = oidc ] && ! at_least "${node_v}" 22.14.0; then
+            echo "::error::Trusted publishing needs Node 22.14 or later; this package resolved Node ${node_v}. Set NODE_VERSION, or use an NPM_TOKEN."
+            exit 1
+          fi
+          # Trusted publishing needs npm 11.5.1+; the npm bundled with older Node versions is updated.
+          if ! at_least "$(npm --version)" 11.5.1; then
+            echo "npm $(npm --version) → 11.20.0"
+            npm install --global npm@11.20.0
+          fi
+          echo "Node ${node_v}, npm $(npm --version)"
+
+      - name: Install dependencies
+        if: steps.detect.outputs.install != ''
+        working-directory: ${{ steps.detect.outputs.root }}
+        env:
+          INSTALL: ${{ steps.detect.outputs.install }}
+        run: |
+          # shellcheck disable=SC2086  # unquoted on purpose: the command has arguments
+          ${INSTALL}
+
+      - name: Build
+        if: steps.detect.outputs.build != ''
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          PM: ${{ steps.detect.outputs.pm }}
+          SCRIPT: ${{ steps.detect.outputs.build }}
+        run: |
+          case "${PM}" in yarn*) run=yarn ;; *) run="${PM}" ;; esac
+          "${run}" run "${SCRIPT}"
+
+      - name: Pack
+        id: pack
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          PACK: ${{ steps.detect.outputs.pack }}
+          NAME: ${{ steps.detect.outputs.name }}
+          VERSION: ${{ steps.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUT="${RUNNER_TEMP}/npm-publish"
+          rm -rf "${OUT}"; mkdir -p "${OUT}"
+          export OUT
+          eval "${PACK}"
+          mapfile -t tarballs < <(find "${OUT}" -maxdepth 1 -name '*.tgz')
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::Expected one tarball in ${OUT}, found ${#tarballs[@]}."; exit 1
+          fi
+          tgz="${tarballs[0]}"
+          # What's inside is what gets published: check its name and version.
+          got=$(tar -xzOf "${tgz}" package/package.json | jq -r '"\(.name)@\(.version)"')
+          if [ "${got}" != "${NAME}@${VERSION}" ]; then
+            echo "::error::The tarball holds ${got}, expected ${NAME}@${VERSION}."; exit 1
+          fi
+          echo "tarball=${tgz}" >> "$GITHUB_OUTPUT"
+          echo "Packed ${got}: $(tar -tzf "${tgz}" | wc -l) files, $(du -h "${tgz}" | cut -f1)"
+          tar -tzf "${tgz}" | sed 's#^package/#  #' | head -n 50
+
+      - name: Configure npm auth
+        if: steps.detect.outputs.found == 'true'
+        env:
+          AUTH: ${{ steps.detect.outputs.auth }}
+          URL: ${{ steps.detect.outputs.url }}
+        run: |
+          set -euo pipefail
+          npmrc="${RUNNER_TEMP}/npm-publish.npmrc"
+          # Only the token reference goes in the file; npm reads the value from the env.
+          # Trusted publishing (oidc) needs no token: npm gets one from GitHub itself.
+          : > "${npmrc}"
+          if [ "${AUTH}" != oidc ]; then
+            # shellcheck disable=SC2016  # literal ${NODE_AUTH_TOKEN}: npm expands it
+            printf '//%s:_authToken=${NODE_AUTH_TOKEN}\n' "${URL#https://}" > "${npmrc}"
+          fi
+          echo "NPM_CONFIG_USERCONFIG=${npmrc}" >> "$GITHUB_ENV"
+
+      - name: Check the registry
+        id: check
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ runner.temp }}
+        env:
+          NODE_AUTH_TOKEN: ${{ steps.detect.outputs.auth == 'github-token' && github.token || secrets.NPM_TOKEN }}
+          NAME: ${{ steps.detect.outputs.name }}
+          VERSION: ${{ steps.detect.outputs.version }}
+          URL: ${{ steps.detect.outputs.url }}
+        run: |
+          set -uo pipefail
+          scope_flag=()
+          [[ "${NAME}" == @*/* ]] && scope_flag=("--${NAME%%/*}:registry=${URL}")
+          if out=$(npm view "${NAME}@${VERSION}" version --registry "${URL}" "${scope_flag[@]}" 2>"${RUNNER_TEMP}/npm-view.err"); then
+            if [ -n "${out}" ]; then
+              echo "::notice::${NAME}@${VERSION} is already in the registry; skipping the publish."
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "${NAME} is in the registry, without ${VERSION}."
+          elif grep -q 'E404' "${RUNNER_TEMP}/npm-view.err"; then
+            echo "${NAME} isn't in the registry yet (or isn't visible without a token): first publish."
+          else
+            echo "::warning::Couldn't check the registry for ${NAME}@${VERSION}; trying the publish anyway. $(head -n 3 "${RUNNER_TEMP}/npm-view.err" | tr '\n' ' ')"
+          fi
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        id: publish
+        if: steps.check.outputs.exists == 'false'
+        working-directory: ${{ runner.temp }}
+        env:
+          NODE_AUTH_TOKEN: ${{ steps.detect.outputs.auth == 'github-token' && github.token || secrets.NPM_TOKEN }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+          NAME: ${{ steps.detect.outputs.name }}
+          URL: ${{ steps.detect.outputs.url }}
+          REGISTRY: ${{ steps.detect.outputs.registry }}
+          DIST_TAG: ${{ steps.detect.outputs.dist_tag }}
+          ACCESS: ${{ steps.detect.outputs.access }}
+          PROVENANCE: ${{ steps.detect.outputs.provenance }}
+          DRY_RUN: ${{ steps.detect.outputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=("${TARBALL}" --registry "${URL}" --tag "${DIST_TAG}")
+          [[ "${NAME}" == @*/* ]] && args+=("--${NAME%%/*}:registry=${URL}")
+          [ "${REGISTRY}" = npmjs ] && args+=(--access "${ACCESS}")
+          [ "${PROVENANCE}" = true ] && args+=(--provenance)
+          [ "${DRY_RUN}" = true ] && args+=(--dry-run)
+          echo "npm publish ${args[*]}"
+          npm publish "${args[@]}"
+          if [ "${DRY_RUN}" = true ]; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Summary
+        if: always() && steps.detect.outputs.found == 'true'
+        env:
+          NAME: ${{ steps.detect.outputs.name }}
+          VERSION: ${{ steps.detect.outputs.version }}
+          REGISTRY: ${{ steps.detect.outputs.registry }}
+          DIST_TAG: ${{ steps.detect.outputs.dist_tag }}
+          AUTH: ${{ steps.detect.outputs.auth }}
+          PROVENANCE: ${{ steps.detect.outputs.provenance }}
+          DRY_RUN: ${{ steps.detect.outputs.dry_run }}
+          EXISTS: ${{ steps.check.outputs.exists }}
+          PUBLISHED: ${{ steps.publish.outputs.published }}
+          OUTCOME: ${{ steps.publish.outcome }}
+          ACCESS: ${{ steps.detect.outputs.access }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          if [ "${REGISTRY}" = github ]; then
+            where="GitHub Packages"
+            link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/packages"
+          else
+            where="npmjs.com"
+            link="https://www.npmjs.com/package/${NAME}/v/${VERSION}"
+          fi
+          case "${AUTH}" in
+            oidc) auth_text="trusted publishing (OIDC)"
+                  # npm adds provenance for public packages from public repos.
+                  if [ "${VISIBILITY}" = public ] && [ "${ACCESS}" = public ]; then auth_text="${auth_text}, with provenance"; fi ;;
+            npm-token) auth_text="NPM_TOKEN"; [ "${PROVENANCE}" = true ] && auth_text="${auth_text}, with provenance" ;;
+            *) auth_text="GITHUB_TOKEN" ;;
+          esac
+          {
+            echo "### npm publish: \`${NAME}@${VERSION}\`"
+            echo
+            if [ "${EXISTS}" = true ]; then
+              echo "Already in ${where}; nothing published."
+            elif [ "${PUBLISHED}" = true ]; then
+              echo "✅ Published to [${where}](${link}) as \`${DIST_TAG}\`."
+            elif [ "${DRY_RUN}" = true ] && [ "${OUTCOME}" = success ]; then
+              echo "Dry run: \`npm publish --dry-run\` passed for ${where} as \`${DIST_TAG}\`. Nothing published."
+            else
+              echo "❌ Not published (${OUTCOME:-not reached}); see the log."
+            fi
+            echo
+            echo "Auth: ${auth_text}."
+          } >> "$GITHUB_STEP_SUMMARY"
