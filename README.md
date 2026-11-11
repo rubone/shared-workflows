@@ -153,6 +153,6 @@ maximum safety), never `@main`. For copy mode, take the file from a release tag,
 [CHANGELOG.md](CHANGELOG.md).
 
 ```bash
-git tag v1.1.0 && git push origin v1.1.0
-git tag -f v1 v1.1.0 && git push -f origin v1
+git tag v1.2.0 && git push origin v1.2.0
+git tag -f v1 v1.2.0 && git push -f origin v1
 ```
